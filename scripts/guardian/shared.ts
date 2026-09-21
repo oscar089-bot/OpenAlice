@@ -514,7 +514,9 @@ export class OptionalServiceController {
       this.child = next
       this.cascade?.trackReplacement(old, next)
 
-      const ready = await waitForHttp(this.healthUrl, { timeoutMs: 15_000 })
+      const ready = await waitForHttp(this.healthUrl, {
+        timeoutMs: Number(process.env['OPENALICE_SERVICE_READY_TIMEOUT_MS'] ?? 60_000),
+      })
       if (!ready) {
         console.error(`[guardian] ${this.spec.name} failed to come back up after restart`)
         return false

@@ -273,12 +273,15 @@ async function main(): Promise<void> {
 
   const spawnUTAController = () => {
     utaStatus = 'starting'
+    // UTA boot includes broker/account discovery and can exceed 15s on a cold
+    // or loaded machine. Keep the budget generous and overridable.
+    const utaReadyTimeoutMs = Number(process.env['OPENALICE_UTA_READY_TIMEOUT_MS'] ?? 60_000)
     const utaInitial = spawnChild(utaSpec)
-    void waitForHttp(`${utaUrl}/__uta/health`, { timeoutMs: 15_000 })
+    void waitForHttp(`${utaUrl}/__uta/health`, { timeoutMs: utaReadyTimeoutMs })
       .then((ready) => {
         utaStatus = ready ? 'ready' : 'offline'
         if (ready) console.log(`[guardian] UTA ready`)
-        else console.warn(`[guardian] UTA did not become ready within 15s — continuing with trading offline`)
+        else console.warn(`[guardian] UTA did not become ready within ${utaReadyTimeoutMs / 1000}s — continuing with trading offline`)
       })
     return new OptionalServiceController(utaSpec, `${utaUrl}/__uta/health`, utaInitial)
   }
@@ -300,16 +303,17 @@ async function main(): Promise<void> {
   }
   const spawnConnectorController = () => {
     connectorStatus = 'starting'
+    const connectorReadyTimeoutMs = Number(process.env['OPENALICE_CONNECTOR_READY_TIMEOUT_MS'] ?? 60_000)
     const initial = spawnChild(connectorSpec)
     const controller = new OptionalServiceController(connectorSpec, `${connectorUrl}/__connector/health`, initial)
-    void waitForHttp(`${connectorUrl}/__connector/health`, { timeoutMs: 15_000 })
+    void waitForHttp(`${connectorUrl}/__connector/health`, { timeoutMs: connectorReadyTimeoutMs })
       .then((ready) => {
         connectorStatus = ready ? 'ready' : 'offline'
         if (ready) {
           connectorRecovery.reset()
           console.log('[guardian] Connector ready')
         } else {
-          console.warn('[guardian] Connector did not become ready within 15s — continuing without external notifications')
+          console.warn(`[guardian] Connector did not become ready within ${connectorReadyTimeoutMs / 1000}s — continuing without external notifications`)
           if (connectorRecoveryReady) scheduleConnectorRecovery(controller)
         }
       })
@@ -336,10 +340,14 @@ async function main(): Promise<void> {
     prefixLogs: true,
   })
 
-  const aliceReady = await waitForHttp(`http://127.0.0.1:${ports.webPort}/api/version`, { timeoutMs: 20_000 })
+  // Alice boots market-data stores, the news collector, plugin gateways, and the
+  // tool registry before it serves /api/version. On a cold cache this can take
+  // well over 20s, so the budget is generous and overridable.
+  const aliceReadyTimeoutMs = Number(process.env['OPENALICE_ALICE_READY_TIMEOUT_MS'] ?? 120_000)
+  const aliceReady = await waitForHttp(`http://127.0.0.1:${ports.webPort}/api/version`, { timeoutMs: aliceReadyTimeoutMs })
   if (!aliceReady) {
     aliceStatus = 'offline'
-    console.error(`[guardian] Alice failed to come up within 20s — aborting before Vite starts`)
+    console.error(`[guardian] Alice failed to come up within ${aliceReadyTimeoutMs / 1000}s — aborting before Vite starts`)
     console.error('[guardian] If another process won a startup race, rerun with --takeover or use `pnpm dev -- --home <path>`.')
     try { alice.kill('SIGTERM') } catch { /* noop */ }
     try { uta?.process.kill('SIGTERM') } catch { /* noop */ }
