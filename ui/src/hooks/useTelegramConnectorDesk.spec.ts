@@ -5,7 +5,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { api } from '../api'
 import type { TelegramConnectorDesk } from '../api/connectors'
+import { useBackendRecoverySignal } from '../auth/AuthContext'
 import { useTelegramConnectorDesk } from './useTelegramConnectorDesk'
+
+vi.mock('../auth/AuthContext', () => ({
+  useBackendRecoverySignal: vi.fn(() => ({ backendUnavailable: false, backendRecoveryGeneration: 0 })),
+}))
 
 vi.mock('../api', () => ({
   api: {
@@ -43,6 +48,18 @@ describe('useTelegramConnectorDesk', () => {
     vi.mocked(api.connectors.desk.update).mockReset()
     vi.mocked(api.connectors.desk.disable).mockReset()
     vi.mocked(api.connectors.desk.load).mockResolvedValue({ desk: null })
+    vi.mocked(useBackendRecoverySignal).mockReturnValue({ backendUnavailable: false, backendRecoveryGeneration: 0 })
+  })
+
+  it('re-reads the desk after a backend outage recovers', async () => {
+    const { result, rerender } = renderHook(() => useTelegramConnectorDesk())
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    expect(result.current.desk).toBeNull()
+
+    vi.mocked(api.connectors.desk.load).mockResolvedValue({ desk: desk() })
+    vi.mocked(useBackendRecoverySignal).mockReturnValue({ backendUnavailable: false, backendRecoveryGeneration: 1 })
+    rerender()
+    await waitFor(() => expect(result.current.desk?.wsId).toBe('ws-a'))
   })
 
   it('loads an unbound desk and then binds one workspace', async () => {

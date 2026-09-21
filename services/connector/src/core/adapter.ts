@@ -36,6 +36,8 @@ export interface ConnectorAdapterContext {
   updateSettings(patch: Record<string, string | number | boolean>): Promise<void>
   getServiceStatus(): string
   sendTest(connectorId: string): Promise<string>
+  /** Stop this adapter's in-flight phone-desk Agent turn, if any. */
+  stopDeskRun?(): Promise<{ stopped: boolean; taskId?: string }>
   forwardOwnerText(input: { text: string; userId: string; chatId?: string; eventId?: string }): Promise<void>
   enqueueArtifactRequest(input: { entryId: string; docIndex: number }): Promise<string>
   enqueueUtaRequest(input: {

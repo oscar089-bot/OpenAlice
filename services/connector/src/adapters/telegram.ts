@@ -484,6 +484,14 @@ export class TelegramConnectorAdapter implements ConnectorAdapter {
       const probeId = await context.sendTest(this.id)
       await reply(`Test notification sent. Probe: ${probeId}`)
     })
+    context.commands.register('stop', async ({ userId, reply }) => {
+      if (!this.isOwner(userId)) return reply('This command is only available to the linked owner.')
+      if (!context.stopDeskRun) return reply('Stopping a reply is unavailable. Update OpenAlice.')
+      const result = await context.stopDeskRun()
+      await reply(result.stopped
+        ? 'Stopping the Agent reply now.'
+        : 'No Agent reply is running for this chat.')
+    })
   }
 
   private async presentInbox(

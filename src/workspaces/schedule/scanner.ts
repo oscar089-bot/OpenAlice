@@ -41,7 +41,7 @@ import {
   issueAssigneeClaimsFirstSession,
   issueAssigneeResumeId,
   issueFirePrompt,
-  issueTimeoutMs,
+  issueRunTimeoutMs,
   readWorkspaceIssues,
   type IssueRecord,
 } from '../issues/declaration.js'
@@ -213,7 +213,7 @@ export class ScheduleScanner {
       issueRunOverrides(issue),
       issueAssigneeResumeId(issue.assignee) ?? undefined,
       issueAssigneeClaimsFirstSession(issue.assignee),
-      issueTimeoutMs(issue.timeout),
+      issueRunTimeoutMs(issue),
       issue.connectorDesk,
       true,
       undefined,
@@ -324,7 +324,7 @@ export class ScheduleScanner {
           issueRunOverrides(issue),
           issueAssigneeResumeId(issue.assignee) ?? undefined,
           issueAssigneeClaimsFirstSession(issue.assignee),
-          issueTimeoutMs(issue.timeout),
+          issueRunTimeoutMs(issue),
           issue.connectorDesk,
           nowMs,
         )
@@ -457,7 +457,7 @@ export class ScheduleScanner {
         }
         agentId = live.agent
         selection = issueRunOverrides(live)
-        timeoutMs = issueTimeoutMs(live.timeout)
+        timeoutMs = issueRunTimeoutMs(live)
         if (commentId && !resumeId) {
           what = `Issue ${issueId}: ${live.title}\n${live.what}\n\nHistory: .alice/issues/${issueId}.comments.json\n\n${what}`
         }

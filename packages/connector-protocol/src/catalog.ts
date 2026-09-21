@@ -104,6 +104,7 @@ export const TELEGRAM_CONNECTOR_DEFINITION: ConnectorDefinition = {
       { name: 'inbox', description: 'Browse recent Inbox items.' },
       { name: 'settings', description: 'Change Inbox push for this chat.' },
       { name: 'model', description: 'Choose Session credential, model and effort.' },
+      { name: 'stop', description: 'Stop the Agent reply that is currently running.' },
       { name: 'uta', description: 'Review and approve pending trades.' },
     ],
     capabilities: ['inbox', 'settings', 'uta', 'desk'],

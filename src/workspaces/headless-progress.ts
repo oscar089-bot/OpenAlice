@@ -52,6 +52,10 @@ export function projectTurnProgress(
   const blocks = structured.blocks.flatMap((block): HeadlessProgressBlock[] => {
     if (block.type === 'text') return [{ type: 'text', text: clipUtf8(block.text, MAX_PROGRESS_TEXT_BYTES) }]
     if (block.type === 'error') return [{ type: 'error', message: clipUtf8(block.message, MAX_PROGRESS_ERROR_BYTES) }]
+    // A tool event without a stable id cannot be paired and violates the
+    // persisted progress schema (`id` must be non-empty), which would make the
+    // whole comment sidecar unreadable and block every later inbound DM.
+    if (!block.id.trim()) return []
     return [{
       type: 'tool',
       id: clipUtf8(block.id, MAX_PROGRESS_LABEL_BYTES),

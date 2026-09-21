@@ -7,6 +7,7 @@
  */
 import { createIssue, updateIssueFields, type MutateResult } from './mutate.js'
 import {
+  CONNECTOR_DESK_RUN_TIMEOUT,
   isConnectorDeskIssue,
   readWorkspaceIssues,
   type IssueRecord,
@@ -127,6 +128,7 @@ export async function createConnectorDesk(
       when: leftover.when ?? CONNECTOR_DESK_DEFAULT_WHEN,
       connectorDesk: connectorId,
       ...(leftover.commentPrompt ? {} : { commentPrompt: '{comment}' }),
+      ...(leftover.timeout ? {} : { timeout: CONNECTOR_DESK_RUN_TIMEOUT }),
     }, { allowConnectorDesk: true })
     if (!revived.ok) {
       return revived.reason === 'invalid'
@@ -144,6 +146,7 @@ export async function createConnectorDesk(
     what: connectorDeskDefaultWhat(label),
     commentPrompt: '{comment}',
     connectorDesk: connectorId,
+    timeout: CONNECTOR_DESK_RUN_TIMEOUT,
   }, { allowConnectorDesk: true })
   if (!created.ok && created.reason === 'conflict') {
     return { ok: false, reason: 'invalid', error: `issue ${created.id} already exists` }

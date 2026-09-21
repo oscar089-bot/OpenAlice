@@ -49,6 +49,8 @@ import {
 export interface DeliveryManagerOptions {
   renderMarket?(reference: string): Promise<ConnectorAttachment>
   sessionModel?(connectorId: string, request: ConnectorModelRequest): Promise<ConnectorModelPanel>
+  /** Owner-facing stop for one connector's in-flight phone-desk turn. */
+  stopDeskRun?(connectorId: string): Promise<{ stopped: boolean; taskId?: string }>
   readWorkspaceFile?(workspaceId: string, path: string): Promise<ConnectorAttachment>
   registry: ConnectorRegistry
   config: ConnectorConfig
@@ -613,6 +615,7 @@ export class DeliveryManager {
       },
       getServiceStatus: () => this.health().status,
       sendTest: (connectorId) => this.sendTest(connectorId),
+      ...(this.options.stopDeskRun ? { stopDeskRun: () => this.options.stopDeskRun!(id) } : {}),
       forwardOwnerText: async (input) => {
         await this.acceptInbound({
           connectorId: id,

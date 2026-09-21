@@ -55,6 +55,14 @@ export function telegramDeskHasRunningWork(
   return tasks.some((task) => task.status === 'running' && isDeskTask(task, desk))
 }
 
+/** The one in-flight turn for a desk, if any. The desk admits one run at a time. */
+export function findRunningDeskTask(
+  tasks: readonly HeadlessTaskRecord[],
+  desk: { wsId: string; issue: { id: string } },
+): HeadlessTaskRecord | undefined {
+  return tasks.find((task) => task.status === 'running' && isDeskTask(task, desk))
+}
+
 function isDeskTask(
   task: Pick<HeadlessTaskRecord, 'trigger' | 'inquiry'>,
   desk: { wsId: string; issue: { id: string } },

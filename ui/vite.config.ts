@@ -66,6 +66,7 @@ const { port: uiPort, strictPort } = readUiPort()
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: {
+    conditions: ['openalice-source'],
     alias: {
       '@': resolve(__dirname, 'src'),
     },

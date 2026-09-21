@@ -44,6 +44,19 @@ describe('headless structured output', () => {
     expect(output.metrics).toEqual({ textBlocks: 1, toolCalls: 1, toolFailures: 0 })
   })
 
+  it('drops tool events whose id is blank so progress stays schema-valid', () => {
+    const output = parseHeadlessOutputText({
+      text: 'x',
+      extractEvents: () => [
+        { type: 'tool-start', id: '', name: 'invalid' },
+        { type: 'tool-finish', id: '', name: 'invalid' },
+        { type: 'text', text: 'Answer.' },
+      ] as const,
+    })
+    expect(output.blocks).toEqual([{ type: 'text', text: 'Answer.' }])
+    expect(output.metrics.toolCalls).toBe(0)
+  })
+
   it('normalizes the Claude 2.1.202 failed-tool stream while ignoring thinking as a reply', () => {
     const output = parse(claudeAdapter, [
       { type: 'system', subtype: 'init', session_id: 'claude-session', model: 'MiniMax-M3' },

@@ -10,6 +10,10 @@ describe('built-in connector setup metadata', () => {
       expect(definition.commands.some((command) => command.name === 'inbox')).toBe(true)
       expect(definition.commands.some((command) => command.name === 'settings')).toBe(true)
       expect(definition.commands.some((command) => command.name === 'uta')).toBe(true)
+      // Only Telegram exposes the owner-facing /stop control today.
+      if (definition.id === 'telegram') {
+        expect(definition.commands.some((command) => command.name === 'stop')).toBe(true)
+      }
       expect(definition.capabilities).toEqual(
         definition.id === 'telegram' || definition.id === 'feishu'
           ? ['inbox', 'settings', 'uta', 'desk']

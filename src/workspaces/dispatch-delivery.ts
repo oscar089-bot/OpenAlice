@@ -60,8 +60,18 @@ export class DispatchDelivery {
     this.progress.delete(task.taskId)
     this.live.delete(task.taskId)
     if (!task.communication?.delivery || task.status === 'running' || task.terminalDelivery || this.busy.has(task.taskId)) return
+    const reply = task.status === 'done' ? text?.trim() : undefined
+    // A completed turn that produced no reply text is a silent failure for the
+    // person who asked: the activity indicator simply stops and nothing arrives.
+    // Tell a conversation sender so the message is visibly unresolved. An
+    // automation wake keeps its deliberate silence when it has nothing to say,
+    // and an explicit [[no-reply]] still suppresses delivery downstream.
+    const missingReply = task.status === 'done' && !reply
+      && task.communication.delivery.source === 'conversation'
     const message = dispatchMessage(task, task.status === 'done' ? 'final' : 'failed',
-      task.status === 'done' ? text ?? undefined : `The Agent could not complete this reply: ${task.error ?? task.status}.`)!
+      task.status === 'done'
+        ? reply ?? (missingReply ? 'The Agent finished without a reply. Send the message again if you still need an answer.' : undefined)
+        : `The Agent could not complete this reply: ${task.error ?? task.status}.`)!
     // Persist before crossing the process boundary. An uncertain receipt must
     // never cause automatic replay of public text/files after restart. The
     // receipt only acknowledges Connector acceptance, not external delivery.

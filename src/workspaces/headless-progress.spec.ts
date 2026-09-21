@@ -40,6 +40,17 @@ describe('projectTurnProgress', () => {
     expect(progress.metrics).toEqual({ textBlocks: 2, toolCalls: 1, toolFailures: 0 })
   })
 
+  it('omits a tool block whose id is blank', () => {
+    const progress = projectTurnProgress(structured({
+      blocks: [
+        { type: 'tool', id: '', name: 'invalid', status: 'completed' },
+        { type: 'text', text: 'Done.' },
+      ],
+      metrics: { textBlocks: 1, toolCalls: 1, toolFailures: 0 },
+    }))
+    expect(progress.blocks).toEqual([{ type: 'text', text: 'Done.' }])
+  })
+
   it('keeps the newest blocks when the compact cap is exceeded', () => {
     const blocks = Array.from({ length: MAX_PROGRESS_BLOCKS + 5 }, (_, index) => ({
       type: 'text' as const,

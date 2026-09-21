@@ -76,6 +76,10 @@ export function shouldProjectDeskComment(
   },
 ): boolean {
   if (!isConnectorDeskIssue(issue) || comment.via) return false
+  // The owner's own Web-UI comment on the desk is already visible where it was
+  // written. Relaying it back would echo the human as a bot message in the
+  // owner chat; only agent-authored comments are projected.
+  if (comment.author === 'human') return false
   return true
 }
 
@@ -94,7 +98,7 @@ export async function projectDeskComment(
   },
 ): Promise<void> {
   const scope = opts?.progressScopeId ?? comment.replyTo
-  if (!isConnectorDeskIssue(issue) || comment.via || !issue.connectorDesk) return
+  if (!shouldProjectDeskComment(issue, comment) || !issue.connectorDesk) return
   const phase = opts?.phase ?? 'final'
   await client.sendOwnerMessage({
     id: `desk-${comment.id}`,

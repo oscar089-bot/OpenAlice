@@ -161,6 +161,15 @@ describe('final comment projection', () => {
     })).toBe(true)
   })
 
+  it('does not echo the owner own comment back into the chat', async () => {
+    const { client, sent } = mockClient()
+    const issue = { connectorDesk: 'telegram' }
+    const comment = { id: 'c-human', author: 'human', at: 'now', markdown: 'typed in the web ui' }
+    expect(shouldProjectDeskComment(issue, comment)).toBe(false)
+    await projectDeskComment(issue, comment, client)
+    expect(sent).toEqual([])
+  })
+
   it('forwards in-turn comments with their automation source and progress phase', async () => {
     const { client, sent } = mockClient()
     const issue = { connectorDesk: 'telegram' }

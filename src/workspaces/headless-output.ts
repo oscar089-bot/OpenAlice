@@ -103,6 +103,9 @@ export class HeadlessOutputAccumulator {
       }
 
       if (event.type === 'tool-start') {
+        // A blank id cannot pair start/finish and fails the persisted progress
+        // contract (`id` must be non-empty), so it is not a usable tool block.
+        if (!event.id.trim()) continue
         const index = this.toolIndexes.get(event.id)
         const next: Extract<HeadlessMessageBlock, { type: 'tool' }> = {
           type: 'tool',
@@ -120,6 +123,7 @@ export class HeadlessOutputAccumulator {
         continue
       }
 
+      if (!event.id.trim()) continue
       const index = this.toolIndexes.get(event.id)
       const current = index === undefined ? null : this.blocks[index]
       const finished: Extract<HeadlessMessageBlock, { type: 'tool' }> = {

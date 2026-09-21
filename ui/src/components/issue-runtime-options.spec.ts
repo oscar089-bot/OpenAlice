@@ -115,6 +115,9 @@ describe('Issue runtime options', () => {
     })).toEqual(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
     expect(issueEffortOptions({ agent: 'omp', semantics: null, modelKnown: false }))
       .toEqual(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
+    // Pi's CLI rejects `ultra`; the shared runtime list must not offer it here.
+    expect(issueEffortOptions({ agent: 'pi', semantics: null, modelKnown: false }))
+      .toEqual(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
   })
 
   it('suggests Grok Build CLI ids on native login and keeps vault catalogs intact', () => {

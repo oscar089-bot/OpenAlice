@@ -14,6 +14,7 @@ import type {
   WorkspaceAiCred,
 } from '../cli-adapter.js';
 import type { HeadlessOutputEvent } from '../headless-output.js';
+import type { ModelReasoningEffort } from '../../ai-providers/model-semantics.js';
 import {
   buildPiProvider,
   migrateLegacyPiAgentDir,
@@ -29,6 +30,22 @@ import {
 const PI_TRUST_FILENAME = 'trust.json';
 const PI_SESSION_PROVIDER_ID = 'openalice-session';
 const PI_SESSION_PROVIDER_ENV = 'OPENALICE_PI_SESSION_PROVIDER';
+
+/** Pi's `--thinking` tiers. Pi spells the lowest tier `off`, not `none`. */
+const PI_RUN_EFFORTS = new Set<ModelReasoningEffort>([
+  'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max',
+]);
+
+/**
+ * A Session binding persisted before this guard can carry a tier Pi does not
+ * accept (`ultra`, offered by the shared runtime list). Forwarding it verbatim
+ * makes Pi warn and silently fall back, so degrade to the nearest valid tier
+ * instead of emitting an invalid flag on every run.
+ */
+export function piThinkingArg(effort: ModelReasoningEffort): string {
+  const normalized = PI_RUN_EFFORTS.has(effort) ? effort : 'max';
+  return normalized === 'none' ? 'off' : normalized;
+}
 
 let piTrustWriteQueue: Promise<void> = Promise.resolve();
 
@@ -283,7 +300,7 @@ export const piAdapter: CliAdapter = {
           : []),
         ...(model ? ['--model', model] : []),
         ...(runtime.binding.reasoningEffort
-          ? ['--thinking', runtime.binding.reasoningEffort === 'none' ? 'off' : runtime.binding.reasoningEffort]
+          ? ['--thinking', piThinkingArg(runtime.binding.reasoningEffort)]
           : []),
       ];
       const env: Record<string, string> = {};

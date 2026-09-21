@@ -11,7 +11,7 @@
     "isolatedModules": true,
     "noEmit": true,
     "resolveJsonModule": true,
-    "baseUrl": ".",
+    "customConditions": ["openalice-source"],
     "paths": {
       "@/*": ["./src/*"]
     }

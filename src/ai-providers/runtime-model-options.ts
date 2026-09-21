@@ -29,6 +29,11 @@ const OMP_RUNTIME_EFFORTS: readonly ModelReasoningEffort[] = [
   'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max',
 ]
 
+/** Pi 0.79 `--thinking` menu. `ultra` is a Codex-subscription tier, not a Pi one. */
+const PI_RUNTIME_EFFORTS: readonly ModelReasoningEffort[] = [
+  'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max',
+]
+
 const AGY_RUNTIME_EFFORTS: readonly ModelReasoningEffort[] = [
   'low', 'medium', 'high',
 ]
@@ -120,5 +125,6 @@ export function runtimeEffortOptions(input: {
     return input.model ? GROK_RUNTIME_EFFORTS : GROK_DEFAULT_MODEL_EFFORTS
   }
   if (input.agent === 'omp') return OMP_RUNTIME_EFFORTS
+  if (input.agent === 'pi') return PI_RUNTIME_EFFORTS
   return ALL_RUNTIME_EFFORTS
 }

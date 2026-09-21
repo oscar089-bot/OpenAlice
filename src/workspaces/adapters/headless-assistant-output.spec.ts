@@ -7,7 +7,7 @@ import { cursorAdapter } from './cursor.js';
 import { grokAdapter } from './grok.js';
 import { ompAdapter } from './omp.js';
 import { opencodeAdapter } from './opencode.js';
-import { piAdapter } from './pi.js';
+import { piAdapter, piThinkingArg } from './pi.js';
 
 /**
  * Real structured reply events captured from the locally supported CLIs on
@@ -142,5 +142,15 @@ describe('extractHeadlessAssistantText', () => {
       expect(adapter.capabilities.headless).toBe(true);
       expect(typeof adapter.extractHeadlessAssistantText).toBe('function');
     }
+  });
+});
+
+describe('piThinkingArg', () => {
+  it('degrades an out-of-menu tier instead of emitting an invalid Pi flag', () => {
+    // `ultra` is a Codex-subscription tier; Pi rejects it with a warning and
+    // silently falls back. A persisted binding must not forward it verbatim.
+    expect(piThinkingArg('ultra')).toBe('max');
+    expect(piThinkingArg('none')).toBe('off');
+    expect(piThinkingArg('high')).toBe('high');
   });
 });

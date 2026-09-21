@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import type { TelegramConnectorDesk } from '../api/connectors'
 import type { ScheduleWhen } from '../api/schedule'
+import { useBackendRecoverySignal } from '../auth/AuthContext'
 
 export interface UseTelegramConnectorDesk {
   desk: TelegramConnectorDesk | null
@@ -23,6 +24,7 @@ export function useTelegramConnectorDesk(connectorId = 'telegram'): UseTelegramC
   const [error, setError] = useState<string | null>(null)
   const [loaded, setLoaded] = useState(false)
   const mounted = useRef(true)
+  const { backendRecoveryGeneration } = useBackendRecoverySignal()
 
   const load = useCallback(async () => {
     try {
@@ -45,6 +47,15 @@ export function useTelegramConnectorDesk(connectorId = 'telegram'): UseTelegramC
       mounted.current = false
     }
   }, [load])
+
+  // A transient backend outage (dev hot reload, restart, or a brief network
+  // drop) must not leave this panel claiming the desk is off. Recovery re-reads
+  // the file-backed truth instead of trusting the state captured before the
+  // blip; the toggle otherwise stays wrong until the whole page is remounted.
+  useEffect(() => {
+    if (backendRecoveryGeneration === 0) return
+    void load()
+  }, [backendRecoveryGeneration, load])
 
   const enable = useCallback(async (wsId: string) => {
     try {

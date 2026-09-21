@@ -323,6 +323,41 @@ describe('ScheduleScanner', () => {
     )
   })
 
+  it('bounds a connector desk run with the default watchdog when no timeout is declared', async () => {
+    const ws = await makeWs('w1', [{
+      id: 'telegram-phone-desk',
+      title: 'Telegram phone desk',
+      when: { kind: 'every', every: '30m' },
+      what: 'wake',
+      connectorDesk: 'telegram',
+    }])
+    const { scanner, dispatch } = scannerFor([ws])
+    await scanner.scan()
+    expect(dispatch).toHaveBeenCalledWith(
+      ws,
+      headlessAdapter,
+      'wake',
+      30 * 60_000,
+      {
+        kind: 'issue',
+        workspaceId: 'w1',
+        issueId: 'telegram-phone-desk',
+        metadata: { kind: 'connector-cron-issue', connectorId: 'telegram' },
+      },
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {
+        kind: 'issue',
+        workspaceId: 'w1',
+        issueId: 'telegram-phone-desk',
+        policy: 'new-each-run',
+        fire: 'schedule',
+      },
+    )
+  })
+
   it('refuses manual retry for an unscheduled or terminal Issue', async () => {
     const ws = await makeWs('w1', [
       { id: 'plain', title: 'Plain work' },

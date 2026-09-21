@@ -99,6 +99,25 @@ export function issueTimeoutMs(timeout?: IssueTimeout): number | undefined {
   return timeout === undefined ? undefined : ISSUE_TIMEOUT_MS[timeout]
 }
 
+/** Phone-desk chat runs are bounded even when the Issue omits an explicit
+ *  `timeout`. An owner-chat turn that never exits would otherwise hold the
+ *  Connector draft indicator open forever and starve every later inbound DM. */
+export const CONNECTOR_DESK_RUN_TIMEOUT: IssueTimeout = '30m'
+
+export function connectorDeskTimeoutMs(): number {
+  return ISSUE_TIMEOUT_MS[CONNECTOR_DESK_RUN_TIMEOUT]
+}
+
+/** Effective watchdog for one Issue run. Connector desks are always bounded so
+ *  a hung owner-chat turn cannot hold the draft indicator open forever. */
+export function issueRunTimeoutMs(
+  issue: Pick<IssueRecord, 'timeout'> & Pick<IssueRecord, 'connectorDesk'>,
+): number | undefined {
+  const explicit = issueTimeoutMs(issue.timeout)
+  if (explicit !== undefined) return explicit
+  return isConnectorDeskIssue(issue) ? connectorDeskTimeoutMs() : undefined
+}
+
 /** Statuses at which a scheduled issue stops firing (it's resolved/abandoned).
  *  This is how a schedule is turned off under the board model — there is no
  *  separate `enabled` flag; mark the issue done/canceled to stop it. */

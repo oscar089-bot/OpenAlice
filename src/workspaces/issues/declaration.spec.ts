@@ -4,7 +4,14 @@ import { join } from 'node:path'
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
-import { issueAssigneeResumeId, issueFirePrompt, issueTimeoutMs, isFireable, readWorkspaceIssues } from './declaration.js'
+import {
+  issueAssigneeResumeId,
+  issueFirePrompt,
+  issueRunTimeoutMs,
+  issueTimeoutMs,
+  isFireable,
+  readWorkspaceIssues,
+} from './declaration.js'
 
 let dir: string
 beforeEach(async () => {
@@ -27,6 +34,21 @@ async function writeLegacyDecl(content: string): Promise<void> {
 }
 
 const fm = (front: string, body = ''): string => `---\n${front}\n---\n${body}`
+
+describe('issueRunTimeoutMs', () => {
+  it('honors a declared watchdog', () => {
+    expect(issueRunTimeoutMs({ timeout: '45m' })).toBe(45 * 60_000)
+  })
+
+  it('bounds a connector desk even when the Issue declares no timeout', () => {
+    expect(issueRunTimeoutMs({ connectorDesk: 'telegram' })).toBe(30 * 60_000)
+  })
+
+  it('leaves an ordinary run unbounded', () => {
+    expect(issueRunTimeoutMs({})).toBeUndefined()
+    expect(issueTimeoutMs(undefined)).toBeUndefined()
+  })
+})
 
 describe('readWorkspaceIssues', () => {
   it('reports absent when there is no issues dir and no legacy file', async () => {

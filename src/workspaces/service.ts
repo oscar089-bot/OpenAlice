@@ -14,6 +14,7 @@ import { resolveAliceProjectIdentity } from '@traderalice/guardian-runtime';
  * Lifecycle: `createWorkspaceService()` at plugin start; `dispose()` at stop.
  */
 
+import type { ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { basename, delimiter, join } from 'node:path';
@@ -116,19 +117,27 @@ import {
   type WorkspaceSessionDirectory,
 } from './session-directory.js';
 import { completeOneShotIssueAfterRun } from './issues/auto-complete.js';
-import { readIssueComments, updateIssueCommentProgress } from './issues/comments.js';
+import {
+  readIssueComments,
+  updateIssueCommentDelivery,
+  updateIssueCommentProgress,
+} from './issues/comments.js';
 import { recordIssueCommentReply } from './issues/comment-delivery.js';
 import {
   createProgressPublisher,
   projectTurnProgress,
 } from './headless-progress.js';
-import { stampTelegramDeskScheduledFire } from './issues/telegram-desk-chat.js';
+import {
+  findRunningDeskTask,
+  stampTelegramDeskScheduledFire,
+} from './issues/telegram-desk-chat.js';
 import {
   IssueChangeTracker,
   issueMutation,
   issueMutationFingerprint,
 } from './issues/change-tracker.js';
 import { updateIssueFields } from './issues/mutate.js';
+import { repairUnboundIssueClaims } from './issues/unbound-claim-repair.js';
 import {
   issueAutomationHealth,
   issueAutomationOwnerState,
@@ -211,6 +220,9 @@ function automationLatestRun(task: HeadlessTaskRecord) {
 
 /** Max concurrent in-flight headless tasks — backstop against unbounded spawn. */
 const MAX_CONCURRENT_HEADLESS = 8;
+
+/** SIGTERM→SIGKILL grace when an owner explicitly stops a headless run. */
+const HEADLESS_CANCEL_GRACE_MS = 5_000;
 
 /** Thrown by `dispatchHeadlessTask` when the concurrency cap is hit (→ HTTP 429). */
 export class HeadlessCapacityError extends Error {
@@ -585,6 +597,8 @@ export interface WorkspaceService {
     when?: { kind: 'every'; every: ConnectorDeskCadence };
   }): Promise<ConnectorDesk>;
   disableConnectorDesk(connectorId: string): Promise<ConnectorDesk | null>;
+  /** Stop the in-flight owner-chat turn for this connector's phone desk. */
+  stopConnectorDeskRun(connectorId: string): Promise<{ stopped: boolean; taskId?: string }>;
   telegramConnectorDesk(): Promise<ConnectorDesk | null>;
   createTelegramConnectorDesk(wsId: string): Promise<ConnectorDesk>;
   updateTelegramConnectorDesk(patch: {
@@ -831,6 +845,11 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
     launcherLogger.child({ scope: 'issue-change-tracker' }),
   );
   const activeResumeIds = new Set<string>();
+  // Live child handles for in-flight headless runs, keyed by durable taskId.
+  // An owner-facing `/stop` on a connector desk kills the exact process; the
+  // registry stays the run-history authority. Entries are removed by the
+  // dispatch path's own cleanup, never by re-deriving process liveness.
+  const runningHeadlessChildren = new Map<string, ChildProcess>();
   // Settings owns the one-per-AliceProject phone desk. Serialize its
   // read-check-write lifecycle so two browser tabs cannot both pass the
   // uniqueness check before either Issue file reaches disk.
@@ -843,6 +862,23 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
   const claimResume = (resumeId: string): boolean => {
     if (activeResumeIds.has(resumeId)) return false;
     activeResumeIds.add(resumeId);
+    return true;
+  };
+
+  /**
+   * Stop one in-flight headless run by its durable task id. SIGTERM first so
+   * the Agent can flush, SIGKILL after a grace window if it ignores that. The
+   * run still lands in the registry as a failed execution — an owner stop is
+   * real history, not an erasure.
+   */
+  const cancelHeadlessTask = (taskId: string): boolean => {
+    const child = runningHeadlessChildren.get(taskId);
+    if (!child) return false;
+    try { child.kill('SIGTERM'); } catch { /* already gone */ }
+    const hard = setTimeout(() => {
+      try { child.kill('SIGKILL'); } catch { /* already gone */ }
+    }, HEADLESS_CANCEL_GRACE_MS);
+    hard.unref?.();
     return true;
   };
 
@@ -963,6 +999,56 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
       });
     }
   };
+
+  /**
+   * Boot repair for comment replies whose run died with the launcher.
+   *
+   * HeadlessTaskRegistry already reconciles a leftover `running` record to
+   * `interrupted`, and DispatchDelivery closes the owner-chat activity lease.
+   * Neither touches the Issue sidecar, so without this the source comment
+   * would read `pending` forever: the board shows a permanent spinner and a
+   * later reader cannot tell "still working" from "this turn is gone".
+   * Only runs that are no longer live are repaired; a real in-flight turn is
+   * left to its own completion path.
+   */
+  const repairInterruptedCommentDeliveries = async (): Promise<void> => {
+    for (const task of headlessTasks.list().slice(0, 100)) {
+      const reply = task.communication?.reply;
+      if (reply?.kind !== 'issue-comment' || task.status === 'running') continue;
+      const issueWorkspace = registry.get(reply.workspaceId);
+      if (!issueWorkspace) continue;
+      const comments = await readIssueComments(issueWorkspace.dir, reply.issueId);
+      if (!comments.ok) continue;
+      const source = comments.comments.find((comment) => comment.id === reply.commentId);
+      if (source?.delivery?.state !== 'pending') continue;
+      await updateIssueCommentDelivery(issueWorkspace.dir, reply.issueId, reply.commentId, {
+        state: 'failed',
+        targetResumeId: task.resumeId,
+        taskId: task.taskId,
+        error: 'OpenAlice restarted while this reply was running.',
+      }).catch((err) => {
+        launcherLogger.warn('issue.comment_delivery_repair_failed', {
+          taskId: task.taskId,
+          wsId: reply.workspaceId,
+          issueId: reply.issueId,
+          commentId: reply.commentId,
+          err,
+        });
+      });
+    }
+  };
+  void repairInterruptedCommentDeliveries();
+  // A `new-then-resume` first fire that died before announcing its native
+  // session id leaves the Issue bound to a Session that can never resume.
+  // Release exactly that claim so the next scan can recruit and evaluate the
+  // condition that may have come true while OpenAlice was down.
+  void repairUnboundIssueClaims({
+    registry,
+    resumeRegistry,
+    headlessTasks,
+    provenanceStore,
+    logger: launcherLogger.child({ scope: 'issue-unbound-claim' }),
+  }).catch((err) => launcherLogger.warn('issue.unbound_claim_repair_failed', { err }));
 
   const telegramDeskChatHost = {
     listWorkspaces: () => registry.list().map((workspace) => ({ id: workspace.id, dir: workspace.dir })),
@@ -1813,6 +1899,7 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
           ...(opts.onProgress ? { onProgress: opts.onProgress } : {}),
           onChildSpawned: (child) => {
             activityLease.attach(child);
+            if (opts.taskId) runningHeadlessChildren.set(opts.taskId, child);
             if (rememberRuntime && existsSync(ws.dir)) {
               rememberRuntime = false;
               void rememberWorkspaceRuntimeBinding({
@@ -1834,6 +1921,7 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
         });
       } finally {
         activityLease.release();
+        if (opts.taskId) runningHeadlessChildren.delete(opts.taskId);
       }
     } finally {
       releaseStartLease();
@@ -3398,6 +3486,22 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
       return { ...desk, issue: disabled.issue };
     })
   );
+  const stopConnectorDeskRun = async (
+    connectorId: string,
+  ): Promise<{ stopped: boolean; taskId?: string }> => {
+    const desk = await connectorDeskOp(connectorId);
+    if (!desk) throw new Error('Chat not found');
+    const task = findRunningDeskTask(headlessTasks.list({ status: 'running' }), desk);
+    if (!task) return { stopped: false };
+    if (!cancelHeadlessTask(task.taskId)) return { stopped: false, taskId: task.taskId };
+    launcherLogger.info('connector.desk_run_stopped', {
+      connectorId,
+      wsId: desk.wsId,
+      issueId: desk.issue.id,
+      taskId: task.taskId,
+    });
+    return { stopped: true, taskId: task.taskId };
+  };
 
   return {
     config,
@@ -3446,6 +3550,7 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
     createConnectorDesk: createConnectorDeskOp,
     updateConnectorDesk: updateConnectorDeskOp,
     disableConnectorDesk: disableConnectorDeskOp,
+    stopConnectorDeskRun,
     telegramConnectorDesk: async () => connectorDeskOp('telegram'),
     createTelegramConnectorDesk: async (wsId: string) => createConnectorDeskOp('telegram', wsId),
     updateTelegramConnectorDesk: async (patch) => updateConnectorDeskOp('telegram', patch),

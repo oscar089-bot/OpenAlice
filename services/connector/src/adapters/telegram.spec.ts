@@ -497,3 +497,33 @@ it('keeps model commands and callbacks owner-only and outside the agent message 
     expect(forwardOwnerText).not.toHaveBeenCalled()
   } finally { await adapter.stop() }
 })
+
+it('stops the running desk reply only for the linked owner', async () => {
+  startMock.mockImplementation(async ({ onStart }) => { onStart?.() })
+  const adapter = new TelegramConnectorAdapter()
+  const stopDeskRun = vi.fn(async () => ({ stopped: true, taskId: 'run-1' }))
+  try {
+    await adapter.start({ enabled: true, settings: { botToken: 'test-token', ownerUserId: '42', chatId: '42' } }, { ...context(), stopDeskRun })
+    await vi.waitFor(() => expect(handlers.has('stop')).toBe(true))
+    const reply = vi.fn(async () => ({ message_id: 7 }))
+    const ctx = { chat: { id: 42, type: 'private' }, from: { id: 77 }, reply }
+    await handlers.get('stop')!(ctx)
+    expect(stopDeskRun).not.toHaveBeenCalled()
+    ctx.from.id = 42
+    await handlers.get('stop')!(ctx)
+    expect(stopDeskRun).toHaveBeenCalledTimes(1)
+    expect(reply).toHaveBeenCalledWith('Stopping the Agent reply now.')
+  } finally { await adapter.stop() }
+})
+
+it('reports when the owner has nothing to stop', async () => {
+  startMock.mockImplementation(async ({ onStart }) => { onStart?.() })
+  const adapter = new TelegramConnectorAdapter()
+  const reply = vi.fn(async () => ({ message_id: 8 }))
+  try {
+    await adapter.start({ enabled: true, settings: { botToken: 'test-token', ownerUserId: '42', chatId: '42' } }, { ...context(), stopDeskRun: async () => ({ stopped: false }) })
+    await vi.waitFor(() => expect(handlers.has('stop')).toBe(true))
+    await handlers.get('stop')!({ chat: { id: 42, type: 'private' }, from: { id: 42 }, reply })
+    expect(reply).toHaveBeenCalledWith('No Agent reply is running for this chat.')
+  } finally { await adapter.stop() }
+})

@@ -56,6 +56,7 @@ export async function startConnectorService(): Promise<void> {
     recorder: journal,
     readWorkspaceFile: fetchWorkspaceAttachment,
     sessionModel: async (id, request) => JSON.parse(await fetchAliceJson(`/cli/connector-model/${encodeURIComponent(id)}`, request)),
+    stopDeskRun: async (id) => JSON.parse(await fetchAliceJson(`/cli/connector-stop/${encodeURIComponent(id)}`, {})),
     renderMarket: fetchMarketChart,
     updateAdapterSettings: (id, patch) => configStore.patchAdapter(id, patch),
   })

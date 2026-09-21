@@ -15,6 +15,7 @@ import {
   shouldProjectDeskComment,
   stampTelegramDeskScheduledFire,
   telegramDeskHasRunningWork,
+  findRunningDeskTask,
   type TelegramDeskChatHost,
 } from './telegram-desk-chat.js'
 import { readIssueComments } from './comments.js'
@@ -58,6 +59,18 @@ function mockClient() {
 }
 
 describe('telegram desk chat filter', () => {
+  it('finds only the in-flight turn for the desk', () => {
+    const desk = { wsId: 'ws-a', issue: { id: 'telegram-phone-desk' } }
+    const running = {
+      taskId: 'run-1', status: 'running' as const,
+      trigger: { kind: 'issue' as const, workspaceId: 'ws-a', issueId: 'telegram-phone-desk' },
+    }
+    expect(telegramDeskHasRunningWork([running], desk)).toBe(true)
+    expect(findRunningDeskTask([running as never], desk)?.taskId).toBe('run-1')
+    expect(findRunningDeskTask([{ ...running, status: 'done' } as never], desk)).toBeUndefined()
+    expect(findRunningDeskTask([{ ...running, trigger: { kind: 'issue' as const, workspaceId: 'ws-a', issueId: 'other' } } as never], desk)).toBeUndefined()
+  })
+
   it('projects agent comments, including syntax discussions, and skips inbound telegram', () => {
     const issue = { connectorDesk: 'telegram' }
     expect(shouldProjectDeskComment(issue, {

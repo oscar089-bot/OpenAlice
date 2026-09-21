@@ -66,6 +66,31 @@ it('closes uncertain delivery without replaying the public reply after restart',
   expect(resumed.sendOwnerMessage.mock.calls[0]?.[0]).not.toHaveProperty('text')
   expect(tasks.get(run.taskId)?.terminalDelivery).toMatchObject({ state: 'closed', error: 'Error: receipt lost' })
 })
+async function conversationTask() {
+  return tasks.create({ wsId: 'execution', resumeId: 'resume-1', agent: 'codex', prompt: 'hi', startedAt: 1,
+    communication: buildDispatchCommunication({
+      target: { workspaceId: 'execution', resumeId: 'resume-1', agent: 'codex' },
+      inquiry: {
+        subject: { kind: 'issue', workspaceId: 'issue', issueId: 'desk', relation: 'owner', commentId: 'c1' },
+        question: 'hi', resolution: { mode: 'reconstructed' },
+      },
+      desk: { connectorId: 'telegram' },
+    }),
+  })
+}
+it('tells a conversation sender when a completed run produced no reply', async () => {
+  const run = await conversationTask(); const { delivery, sendOwnerMessage } = setup()
+  await tasks.complete(run.taskId, { status: 'done' }); await delivery.finish(run, null)
+  const last = sendOwnerMessage.mock.calls.at(-1)?.[0]
+  expect(last).toMatchObject({ phase: 'final', source: 'conversation' })
+  expect(last?.text).toMatch(/without a reply/i)
+})
+it('keeps an automation wake silent when it completes with nothing to say', async () => {
+  const run = await task(); const { delivery, sendOwnerMessage } = setup()
+  await tasks.complete(run.taskId, { status: 'done' }); await delivery.finish(run, null)
+  expect(sendOwnerMessage.mock.calls.at(-1)?.[0]).toMatchObject({ phase: 'final', source: 'automation' })
+  expect(sendOwnerMessage.mock.calls.at(-1)?.[0]?.text).toBeUndefined()
+})
 it('does not send a historical task merely because it has a desk trigger', async () => {
   await tasks.create({ wsId: 'w', resumeId: 'r', agent: 'codex', prompt: 'old', startedAt: 1, trigger: { kind: 'issue', workspaceId: 'w', issueId: 'desk', metadata: { kind: 'connector-cron-issue', connectorId: 'telegram' } } })
   tasks = await HeadlessTaskRegistry.load(join(home, 'tasks.json'), logger)
