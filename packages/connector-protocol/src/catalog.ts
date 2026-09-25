@@ -42,6 +42,15 @@ export const DISCORD_CONNECTOR_DEFINITION: ConnectorDefinition = {
         defaultValue: true,
         description: 'When off, new Inbox items stay in OpenAlice until you open them there or run /inbox.',
       },
+      {
+        key: 'boardChannelId',
+        label: 'Watcher board channel ID',
+        kind: 'text',
+        required: false,
+        group: 'preferences',
+        description: 'Optional. Post the persistent watcher board to this text channel instead of your DM. Right-click the channel and Copy Channel ID (enable Developer Mode). Leave blank to use the DM.',
+        placeholder: 'Blank = your DM',
+      },
     ],
     commands: [
       { name: 'link', description: 'Link this Discord account as the owner.' },
@@ -106,6 +115,7 @@ export const TELEGRAM_CONNECTOR_DEFINITION: ConnectorDefinition = {
       { name: 'model', description: 'Choose Session credential, model and effort.' },
       { name: 'stop', description: 'Stop the Agent reply that is currently running.' },
       { name: 'uta', description: 'Review and approve pending trades.' },
+      { name: 'watchers', description: 'Open the live watcher board.' },
     ],
     capabilities: ['inbox', 'settings', 'uta', 'desk'],
     setupLinks: [

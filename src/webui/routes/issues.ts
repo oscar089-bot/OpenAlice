@@ -188,6 +188,7 @@ export function createIssuesRoutes(svc: WorkspaceService, deps: IssueRoutesDeps 
       what?: string
       commentPrompt?: string | null
       catchUp?: boolean
+      watch?: unknown | null
     } = {}
     if ('status' in fields) {
       const s = fields['status']
@@ -338,10 +339,19 @@ export function createIssuesRoutes(svc: WorkspaceService, deps: IssueRoutesDeps 
       }
       patch.catchUp = fields['catchUp']
     }
+    if ('watch' in fields) {
+      // `null` clears the watcher and its persisted state; an object replaces
+      // it and re-arms (the loop resets state when the spec fingerprint changes).
+      const raw = fields['watch']
+      if (raw !== null && (typeof raw !== 'object' || Array.isArray(raw))) {
+        return c.json({ error: 'invalid_watch', message: 'watch must be an object or null' }, 400)
+      }
+      patch.watch = raw as unknown | null
+    }
     if (Object.keys(patch).length === 0) {
       return c.json({
         error: 'no_fields',
-        message: 'provide at least one of status, priority, assignee, agent, credential, model, effort, timeout, what, commentPrompt, catchUp',
+        message: 'provide at least one of status, priority, assignee, agent, credential, model, effort, timeout, what, commentPrompt, catchUp, watch',
       }, 400)
     }
 

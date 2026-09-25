@@ -2,11 +2,13 @@ import { useEffect, useState } from 'react'
 import type { TFunction } from 'i18next'
 import { useTranslation } from 'react-i18next'
 import {
+  Activity,
   Layers,
   ChevronDown,
   ChevronRight,
   Clock,
   Copy,
+  Eye,
   ListChecks,
 } from 'lucide-react'
 
@@ -17,6 +19,7 @@ import type {
   IssuePriority,
   IssuePatch,
   IssueStatus,
+  IssueWatchSummary,
   IssueWorkspace,
 } from '../api/issues'
 import type { ScheduleWhen } from '../api/schedule'
@@ -26,6 +29,7 @@ import { formatRelativeTime } from '../lib/intl'
 import { useWorkspace } from '../tabs/store'
 import { CenteredLoading } from './StateViews'
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from './ui/dropdown-menu'
+import { Popover, PopoverContent, PopoverTrigger } from './ui/popover'
 import { SelectionCheckIcon } from './ui/selection-check-icon'
 import { IssueAssigneePopover } from './IssueAssigneePopover'
 import { IssueListToolbar } from './IssueListToolbar'
@@ -216,6 +220,30 @@ export function AutomationHealthPill({ health }: { health: IssueAutomationHealth
   )
 }
 
+/** Board badge for an Issue carrying a deterministic market watcher.
+ *
+ *  The board row only has the authored summary (pair / timeframe / rule count);
+ *  full state and event history live on the detail read, so this stays cheap.
+ *  Labelled a "market watch" so it cannot be confused with the scheduling
+ *  clock affordance beside it. */
+export function MarketWatchPill({ watch }: { watch: IssueWatchSummary }) {
+  const { t } = useTranslation()
+  return (
+    <span
+      title={t('issues.watchPillTitle', {
+        pair: watch.pair,
+        timeframe: watch.timeframe,
+        count: watch.ruleCount,
+      })}
+      aria-label={t('issues.watchPillLabel')}
+      className="inline-flex shrink-0 items-center gap-1 rounded-full border border-border/70 px-2 py-0.5 text-[11px] text-muted-foreground"
+    >
+      <Eye size={11} className="shrink-0" aria-hidden />
+      <span className="tabular-nums">{watch.pair}</span>
+    </span>
+  )
+}
+
 // ==================== Priority indicator (Linear-style bars) ====================
 
 /**
@@ -399,6 +427,7 @@ function IssueRow({ wsId, wsTag, issue, dupOthers, onOpen, onPatch, columns }: B
             <Copy size={12} aria-hidden />
           </span>
         )}
+        {issue.watch && <MarketWatchPill watch={issue.watch} />}
         {columns.includes('workspace') && <span className="hidden max-w-36 shrink-0 items-center gap-1.5 rounded-full border border-border/70 px-2 py-0.5 text-[11px] text-muted-foreground lg:inline-flex" title={t('issues.workspaceTitle', { workspace: wsTag, id: wsId.slice(0, 8) })}>
           <Layers size={11} className="shrink-0" aria-hidden />
           <span className="truncate">{wsTag}</span>

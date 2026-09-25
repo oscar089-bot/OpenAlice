@@ -26,6 +26,18 @@ it('versions file content independently of the CLI registry', async () => {
   await writeFile(join(paths.root, 'skills/alice/SKILL.md'), 'changed manual')
   expect(await aliceHarnessSourceVersion()).not.toBe(before)
 })
+it('ignores Python bytecode when fingerprinting Skills', async () => {
+  // Python is a Skill dependency now, so __pycache__ is an expected local
+  // artifact. Counting it would report a false "Skills out of date" warning.
+  const before = await aliceHarnessSourceVersion()
+  await mkdir(join(paths.root, 'skills/alice/scripts/__pycache__'), { recursive: true })
+  await writeFile(join(paths.root, 'skills/alice/scripts/__pycache__/smc.cpython-312.pyc'), 'bytecode')
+  await writeFile(join(paths.root, 'skills/alice/scripts/loose.pyc'), 'bytecode')
+  expect(await aliceHarnessSourceVersion()).toBe(before)
+  // A real source edit still moves the revision.
+  await writeFile(join(paths.root, 'skills/alice/scripts/smc.py'), 'print(1)')
+  expect(await aliceHarnessSourceVersion()).not.toBe(before)
+})
 it('keeps CLI switches separate from Skill inclusion and creates both runtime copies', async () => {
   const dir = join(paths.root, 'workspace')
   await injectAliceHarnessSkills(dir, true, { schemaVersion: 1, cli: { alice: { enabled: false } }, skills: { traderhub: false } })

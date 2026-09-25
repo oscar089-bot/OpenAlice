@@ -10,9 +10,15 @@ export async function aliceHarnessSourceVersion(): Promise<string> {
   const hash = createHash('sha256')
   async function walk(dir: string, relative: string) {
     for (const entry of (await readdir(dir, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
+      // Python is now a Skill dependency, so bytecode is an expected local
+      // artifact. It is neither shipped content nor a deliberate edit, and
+      // including it would report a false "Skills out of date" warning.
+      if (entry.isDirectory() && entry.name === '__pycache__') continue
       const path = join(dir, entry.name)
       if (entry.isDirectory()) await walk(path, `${relative}/${entry.name}`)
-      else if (entry.isFile()) hash.update(`${relative}/${entry.name}\0`).update(await readFile(path))
+      else if (entry.isFile() && !entry.name.endsWith('.pyc') && !entry.name.endsWith('.pyo')) {
+        hash.update(`${relative}/${entry.name}\0`).update(await readFile(path))
+      }
     }
   }
   for (const skill of ALICE_HARNESS_SKILLS) await walk(defaultPath('skills', skill), skill)

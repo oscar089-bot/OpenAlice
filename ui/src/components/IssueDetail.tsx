@@ -2,7 +2,20 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { TFunction } from 'i18next'
 import { useTranslation } from 'react-i18next'
-import { ArrowLeft, Check, ChevronRight, Clock, Cpu, Hash, History, Inbox, KeyRound, ListChecks, LoaderCircle, MessageSquare, Play, RotateCcw, Settings, SlidersHorizontal, Timer, TrendingUp, UserRound, X } from 'lucide-react'
+import { Activity, ArrowLeft, Check, ChevronRight, Clock, Cpu, Crosshair, Eye, Gauge, Hash, History, Inbox, KeyRound, ListChecks, LoaderCircle, MapPin, MessageSquare, Play, Radio, RefreshCw, RotateCcw, Settings, ShieldAlert, SlidersHorizontal, Target, Timer, TrendingUp, UserRound, X, Zap } from 'lucide-react'
+
+import {
+  distanceToTrigger,
+  formatDuration as formatWatchDuration,
+  formatPriceValue,
+  watcherCandleCountdownLine,
+  watcherCandleTrackingLine,
+  watcherTriggerProgress,
+  watcherTriggerSide,
+  watcherTriggerTarget,
+  zoneBounds,
+  zonePosition,
+} from '@traderalice/connector-protocol'
 
 import type { HeadlessTaskStatus, HeadlessTurnProgress } from '../api/headless'
 import type { InboxEntry } from '../api/inbox'
@@ -475,6 +488,354 @@ function IssueAiEditor({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  )
+}
+
+/** One-second clock for live watcher readouts.
+ *
+ *  The detail poll is 15s, so a raw `lastChecked` string freezes between polls
+ *  and the panel looks dead. Ticking locally makes "checked 4s ago" visibly
+ *  count up, which is the honest liveness signal: the loop runs every 5s, so
+ *  the age climbing past a few intervals is exactly what "stalled" looks like.
+ *
+ *  Only ticks while a watcher is present and not terminal, so a finished Issue
+ *  costs no timer. */
+function useWatchClock(active: boolean): number {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (!active) return
+    const timer = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(timer)
+  }, [active])
+  return now
+}
+
+function WatchStatus({ issue }: { issue: IssueDetailIssue }) {
+  const { t } = useTranslation()
+  const status = issue.watch
+  const state = status?.state ?? null
+  const terminalState = state?.terminal === true
+  const now = useWatchClock(Boolean(status) && !terminalState)
+  if (!status) return null
+  const { spec, events } = status
+
+  // Human labels for the rule kinds the evaluator can emit. An unknown value
+  // falls through verbatim so a future rule type is visible, not swallowed.
+  const RULE_LABEL: Record<string, string> = {
+    price_breaks_level: t('issues.detail.watchRule.breaksLevel'),
+    price_crosses_level: t('issues.detail.watchRule.crossesLevel'),
+    candle_close: t('issues.detail.watchRule.candleClose'),
+    level_reclaim: t('issues.detail.watchRule.reclaim'),
+    level_breakdown: t('issues.detail.watchRule.breakdown'),
+    liquidity_sweep_touched: t('issues.detail.watchRule.sweep'),
+    price_enters_zone: t('issues.detail.watchRule.entersZone'),
+    price_approaches_zone: t('issues.detail.watchRule.approachesZone'),
+    r_multiple_reached: t('issues.detail.watchRule.rMultiple'),
+    unrealized_pnl_pct: t('issues.detail.watchRule.pnl'),
+  }
+
+  const describeRule = (rule: { type: string; side?: string; level?: number; low?: number; high?: number; timeframe?: string; multiple?: number; pct?: number; op?: string }): string => {
+    const label = RULE_LABEL[rule.type] ?? rule.type
+    if (rule.type === 'candle_close') {
+      return `${label} · ${rule.timeframe ?? spec.timeframe} ${rule.side ?? ''} ${rule.level}`.trim()
+    }
+    if (rule.type === 'price_enters_zone' || rule.type === 'price_approaches_zone') {
+      return `${label} · ${rule.low}–${rule.high}`
+    }
+    if (rule.type === 'r_multiple_reached') return `${label} · ${rule.multiple}R`
+    if (rule.type === 'unrealized_pnl_pct') return `${label} · ${rule.op ?? ''} ${rule.pct}%`.trim()
+    if (rule.level !== undefined) return `${label} · ${rule.side ?? ''} ${rule.level}`.trim()
+    return label
+  }
+
+  // Live state is the truth once the loop has run; before that the authored
+  // spec is all we can honestly show.
+  const terminal = state?.terminal === true
+  const armed = state !== null && state !== undefined && !terminal
+  const statusKey = !state
+    ? 'issues.detail.watchState.notStarted'
+    : terminal
+      ? 'issues.detail.watchState.terminal'
+      : armed
+        ? 'issues.detail.watchState.armed'
+        : 'issues.detail.watchState.idle'
+
+  const firedKeys = Object.keys(state?.firedConditions ?? {})
+
+  // Age of the last check, computed from the ticking clock rather than
+  // `Date.now()`, so the label advances every second instead of freezing
+  // between 15s polls. The loop runs every 5s, so this climbing past the stall
+  // window and resetting is the honest "still polling" signal.
+  const lastCheckedMs = state?.lastChecked ? Date.parse(state.lastChecked) : null
+  const ageMs = lastCheckedMs === null ? null : Math.max(0, now - lastCheckedMs)
+  const ageSeconds = ageMs === null ? null : Math.floor(ageMs / 1000)
+  // Generous enough to cover a slow fetch (the loop's own per-fetch ceiling is
+  // 20s), tight enough that a genuinely dead poller stops looking live. It was
+  // 90s when the loop ran every 30s; at a 5s cadence that is 18 missed ticks.
+  //
+  // An ACTIVE backoff is deliberately not stale: the loop is choosing not to
+  // re-fetch a failing feed, and the panel already shows a dedicated
+  // "retrying in …" line. Flagging that as a stall would double-report one
+  // condition and make a self-healing feed look broken.
+  const backingOff = state?.backoffUntil !== null
+    && state?.backoffUntil !== undefined
+    && Date.parse(state.backoffUntil) > now
+  const stale = ageSeconds !== null && ageSeconds > 30 && !backingOff
+  const checkingNow = ageSeconds !== null && ageSeconds <= 2
+
+  // The trigger geometry is computed by the SAME shared helper the Discord board
+  // uses, so the desktop panel and the phone card can never disagree about how
+  // close the market is to firing.
+  const zone = zoneBounds(spec)
+  const [target, triggerText] = watcherTriggerTarget(spec)
+  const side = watcherTriggerSide(spec)
+  const currentPrice = state?.lastPrice ?? null
+  const progress = state
+    ? watcherTriggerProgress(spec, state, currentPrice, target, side)
+    : null
+  const distance = progress ? distanceToTrigger(progress.basisPrice, target, zone, side) : '—'
+  const priceLocation = zonePosition(currentPrice, zone)
+  const marketMs = state?.lastMarketTimestamp ? Date.parse(state.lastMarketTimestamp) : null
+  const marketTimeText = marketMs === null || Number.isNaN(marketMs)
+    ? '—'
+    : `${new Date(marketMs).toISOString().slice(11, 19)} UTC`
+  const candleTracking = state ? watcherCandleTrackingLine(spec, state, target, side) : ''
+  const candleCountdown = state
+    ? watcherCandleCountdownLine(spec, state, new Date(now).toISOString())
+    : ''
+  const zoneText = zone ? `${formatPriceValue(zone.low)}–${formatPriceValue(zone.high)}` : '—'
+
+  return (
+    <div className="space-y-3 text-sm">
+      <div className="flex items-center justify-between gap-3">
+        <span className="flex items-center gap-1.5 text-xs font-medium text-foreground">
+          <Eye size={13} aria-hidden />
+          {spec.pair}
+          <span className="text-muted-foreground">· {spec.timeframe}</span>
+          {spec.direction && (
+            <span className="rounded bg-muted px-1 py-px text-[10px] font-semibold tracking-wide text-muted-foreground">
+              {spec.direction}
+            </span>
+          )}
+        </span>
+        <span
+          className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-medium ${
+            terminal
+              ? 'bg-muted text-muted-foreground'
+              : stale
+                ? 'bg-warning/15 text-warning'
+                : 'bg-success/15 text-success'
+          }`}
+        >
+          {/* A live dot only while the watcher is genuinely being evaluated.
+              Not an animation for its own sake: it distinguishes an armed
+              watcher from a stalled one at a glance. */}
+          {!terminal && !stale && (
+            <span
+              aria-hidden
+              className={`size-1.5 rounded-full bg-current ${checkingNow ? 'animate-pulse motion-reduce:animate-none' : ''}`}
+            />
+          )}
+          {t(statusKey)}
+        </span>
+      </div>
+
+      {/* Price → trigger, the headline readout. The bar is the literal
+          percentage the shared helper computed, not a decorative meter. */}
+      <div className="space-y-2 rounded-lg border border-border/60 bg-muted/20 p-3">
+        <div className="flex items-baseline justify-between gap-3">
+          <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <Activity size={13} aria-hidden />
+            {t('issues.detail.watchLastPrice')}
+          </span>
+          <span className="text-lg font-semibold tabular-nums text-foreground">
+            {formatPriceValue(currentPrice)}
+          </span>
+        </div>
+        <div className="flex items-center justify-between gap-3 text-xs">
+          <span className="flex items-center gap-1.5 text-muted-foreground">
+            <Target size={13} aria-hidden />
+            {t('issues.detail.watchTriggerTarget')}
+          </span>
+          <span className="tabular-nums text-foreground">
+            {target === '-'
+              ? '—'
+              : target.includes('-')
+                ? target
+                : formatPriceValue(Number.parseFloat(target))}
+            <span className="ml-2 text-muted-foreground">{distance}</span>
+          </span>
+        </div>
+        {/* Where price sits relative to the entry zone — the readout that makes
+            an approaching/entering watcher legible at a glance. */}
+        <div className="flex items-center justify-between gap-3 text-xs">
+          <span className="flex items-center gap-1.5 text-muted-foreground">
+            <MapPin size={13} aria-hidden />
+            {t('issues.detail.watchPriceLocation')}
+          </span>
+          <span className="text-right text-foreground">{priceLocation}</span>
+        </div>
+        <div className="space-y-1">
+          <div className="flex items-center justify-between gap-3 text-xs">
+            <span className="flex items-center gap-1.5 text-muted-foreground">
+              <Gauge size={13} aria-hidden />
+              {t('issues.detail.watchProgress')}
+            </span>
+            <span className="tabular-nums text-foreground">
+              {progress ? progress.text : t('issues.detail.watchState.notStarted')}
+            </span>
+          </div>
+          {/* A real progress bar, colored by how close the trigger is, so the
+              panel reads at a glance without parsing the number. */}
+          <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
+            <div
+              className={`h-full rounded-full transition-[width] duration-500 motion-reduce:transition-none ${
+                progress && progress.percent >= 100
+                  ? 'bg-success'
+                  : progress && progress.percent >= 66
+                    ? 'bg-warning'
+                    : 'bg-primary'
+              }`}
+              style={{ width: `${progress ? Math.max(2, progress.percent) : 2}%` }}
+            />
+          </div>
+          <div className="flex items-center justify-end text-[11px] text-muted-foreground">
+            <span>{progress ? progress.need : '—'}</span>
+          </div>
+        </div>
+        {spec.position && (
+          <div className="flex items-center justify-between gap-3 border-t border-border/50 pt-2 text-xs">
+            <span className="flex items-center gap-1.5 text-muted-foreground">
+              <Crosshair size={13} aria-hidden />
+              {t('issues.detail.watchPosition')}
+            </span>
+            <span className="tabular-nums text-foreground">
+              {spec.position.side} @ {formatPriceValue(spec.position.entry)}
+              {typeof spec.position.stop === 'number' && (
+                <span className="ml-2 text-destructive/80">
+                  {t('issues.detail.watchStop')} {formatPriceValue(spec.position.stop)}
+                </span>
+              )}
+              {spec.position.targets && spec.position.targets.length > 0 && (
+                <span className="ml-2 text-success">
+                  {t('issues.detail.watchTargets')} {spec.position.targets.map((value) => formatPriceValue(value)).join(', ')}
+                </span>
+              )}
+            </span>
+          </div>
+        )}
+      </div>
+
+      {candleTracking && (
+        <p className="text-xs leading-snug text-muted-foreground">{candleTracking}</p>
+      )}
+      {candleCountdown && (
+        <p className="flex items-center gap-1.5 text-xs leading-snug text-muted-foreground">
+          <Timer size={13} aria-hidden />
+          {candleCountdown}
+        </p>
+      )}
+
+      <div className="flex items-center justify-between gap-3 text-xs">
+        <span className="flex items-center gap-1.5 text-muted-foreground">
+          <Zap size={13} aria-hidden />
+          {t('issues.detail.watchWatchingFor')}
+        </span>
+        <span className="truncate text-right text-foreground" title={triggerText}>{triggerText}</span>
+      </div>
+
+      <div className="flex items-center justify-between gap-3 text-xs">
+        <span className="flex items-center gap-1.5 text-muted-foreground">
+          <SlidersHorizontal size={13} aria-hidden />
+          {t('issues.detail.watchEntryZone')}
+        </span>
+        <span className="tabular-nums text-foreground">{zoneText}</span>
+      </div>
+
+      <ul className="space-y-1.5">
+        {spec.rules.map((rule, index) => (
+          <li key={`r-${index}`} className="flex items-start gap-2 text-xs leading-snug text-muted-foreground">
+            <span className="mt-1 size-1.5 shrink-0 rounded-full bg-primary/60" aria-hidden />
+            <span>{describeRule(rule)}</span>
+          </li>
+        ))}
+        {spec.invalidationRules.map((rule, index) => (
+          <li key={`i-${index}`} className="flex items-start gap-2 text-xs leading-snug text-destructive/80">
+            <span className="mt-1 size-1.5 shrink-0 rounded-full bg-destructive/60" aria-hidden />
+            <span>{t('issues.detail.watchInvalidation')}: {describeRule(rule)}</span>
+          </li>
+        ))}
+        {spec.managementRules.map((rule, index) => (
+          <li key={`m-${index}`} className="flex items-start gap-2 text-xs leading-snug text-muted-foreground">
+            <span className="mt-1 size-1.5 shrink-0 rounded-full bg-warning/60" aria-hidden />
+            <span>{describeRule(rule)}</span>
+          </li>
+        ))}
+      </ul>
+
+      <div className="grid grid-cols-2 gap-x-3 gap-y-2 border-t border-border/50 pt-3 text-xs">
+        <span className="flex items-center gap-1.5 text-muted-foreground">
+          <Clock size={13} aria-hidden />
+          {t('issues.detail.watchLastChecked')}
+        </span>
+        <span className={`text-right tabular-nums ${stale ? 'text-warning' : 'text-foreground'}`}>
+          {ageSeconds === null
+            ? '—'
+            : ageSeconds < 60
+              ? t('issues.detail.watchSecondsAgo', { count: ageSeconds })
+              : formatRelativeTime(state?.lastChecked ?? null, { fallback: '—' })}
+        </span>
+        <span className="flex items-center gap-1.5 text-muted-foreground">
+          <RefreshCw size={13} aria-hidden />
+          {t('issues.detail.watchChecks')}
+        </span>
+        <span className="text-right tabular-nums text-foreground">{state?.pollCount ?? 0}</span>
+        <span className="flex items-center gap-1.5 text-muted-foreground">
+          <Radio size={13} aria-hidden />
+          {t('issues.detail.watchMarketData')}
+        </span>
+        <span className="text-right tabular-nums text-foreground">{marketTimeText}</span>
+        {firedKeys.length > 0 && (
+          <>
+            <span className="text-muted-foreground">{t('issues.detail.watchFiredCount')}</span>
+            <span className="text-right tabular-nums text-foreground">{firedKeys.length}</span>
+          </>
+        )}
+      </div>
+
+      {state?.lastError && (
+        <p className="flex items-start gap-1.5 text-xs leading-snug text-warning">
+          <ShieldAlert size={13} className="mt-0.5 shrink-0" aria-hidden />
+          <span>
+            {state.lastError}
+            {state.backoffUntil && Date.parse(state.backoffUntil) > now && (
+              <span className="ml-1 text-warning/80">
+                {t('issues.detail.watchBackoff', {
+                  duration: formatWatchDuration(Math.floor((Date.parse(state.backoffUntil) - now) / 1000)),
+                })}
+              </span>
+            )}
+          </span>
+        </p>
+      )}
+
+      {events && events.length > 0 && (
+        <ul className="space-y-1.5 border-t border-border/50 pt-3">
+          {[...events].reverse().slice(0, 5).map((event, index) => (
+            <li key={`${event.conditionKey}-${index}`} className="text-xs leading-snug text-muted-foreground">
+              <span className="font-medium text-foreground">{event.eventType}</span>
+              {' · '}
+              {event.message}
+              {event.at && (
+                <span className="ml-1 text-muted-foreground/70">{formatRelativeTime(Date.parse(event.at))}</span>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <p className="text-[11px] leading-relaxed text-muted-foreground">{t('issues.detail.watchHint')}</p>
+    </div>
   )
 }
 
@@ -958,10 +1319,15 @@ function PropertiesRail({
           </div>
         </InspectorSection>
 
+        {issue.watch && (
+          <InspectorSection title={t('issues.detail.watch')}>
+            <WatchStatus issue={issue} />
+          </InspectorSection>
+        )}
+
         {issue.when && (
           <InspectorSection title={t('issues.detail.schedule')}>
-            <div className="-mx-2"><SchedulePolicyEditor issue={issue} saving={saving} onPatch={onPatch} /></div>
-            <div className="mt-3 flex items-center justify-between gap-3 border-t border-border/50 pt-3 text-xs">
+            <div className="-mx-2"><SchedulePolicyEditor issue={issue} saving={saving} onPatch={onPatch} /></div>            <div className="mt-3 flex items-center justify-between gap-3 border-t border-border/50 pt-3 text-xs">
               <span className="flex items-center gap-1.5 text-muted-foreground">
                 <Clock size={13} aria-hidden />
                 {t('issues.detail.nextRun')}

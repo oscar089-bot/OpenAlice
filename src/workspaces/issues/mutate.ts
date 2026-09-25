@@ -44,6 +44,7 @@ import {
   type IssueTimeout,
 } from './declaration.js'
 import { parseIssueCommentPrompt } from './comment-prompt.js'
+import { watchSpecSchema } from '../watch/schema.js'
 export { appendIssueComment } from './comments.js'
 
 /** Fields a human/agent may patch on an existing issue. Most scheduling
@@ -72,6 +73,9 @@ export interface IssueFieldPatch {
   commentPrompt?: string | null
   /** Cron missed-fire policy; only valid when the Issue already has a cron `when`. */
   catchUp?: boolean
+  /** Deterministic market watcher. `null` removes the watch and its state
+   *  sidecar; omission leaves any existing watch untouched. */
+  watch?: unknown | null
   /** Settings-only cadence edit for the phone desk. */
   when?: unknown
   /** Settings-only: adapter id binds the desk; `null` removes the flag. */
@@ -98,6 +102,8 @@ export interface CreateIssueInput {
   timeout?: IssueTimeout
   /** Comment-reply Input Prompt template. Omission keeps the default wrapper. */
   commentPrompt?: string
+  /** Deterministic market watcher. */
+  watch?: unknown
   /** @deprecated Compatibility alias for callers written before What became the
    * sole markdown document. New callers must use `what`. */
   body?: string
@@ -303,6 +309,23 @@ export async function updateIssueFields(
     }
     delete data.telegramConnector
   }
+  if (patch.watch !== undefined) {
+    if (patch.watch === null) {
+      delete data.watch
+    } else {
+      const watch = watchSpecSchema.safeParse(patch.watch)
+      if (!watch.success) {
+        return {
+          ok: false,
+          reason: 'invalid',
+          error: `invalid watch: ${watch.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`,
+        }
+      }
+      data.watch = watch.data
+      // A re-armed watch must not inherit the previous phase's firing history.
+      // The loop resets state when the authored spec changes; see loop.ts.
+    }
+  }
   if (patch.when !== undefined) {
     const when = issueWhenSchema.safeParse(patch.when)
     if (!when.success) return { ok: false, reason: 'invalid', error: 'invalid when' }
@@ -392,6 +415,17 @@ export async function createIssue(
     const parsed = parseIssueCommentPrompt(input.commentPrompt)
     if (!parsed.ok) return { ok: false, reason: 'invalid', error: parsed.error }
     data.commentPrompt = parsed.template
+  }
+  if (input.watch !== undefined) {
+    const watch = watchSpecSchema.safeParse(input.watch)
+    if (!watch.success) {
+      return {
+        ok: false,
+        reason: 'invalid',
+        error: `invalid watch: ${watch.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`,
+      }
+    }
+    data.watch = watch.data
   }
   const requestedDesk = input.connectorDesk ?? (input.telegramConnector === true ? 'telegram' : undefined)
   if (requestedDesk) {

@@ -12,8 +12,10 @@ import {
   connectorUtaFailureSchema,
   connectorUtaPresentationSchema,
   connectorUtaRequestSchema,
+  connectorWatchRequestSchema,
   inboundOwnerMessageSchema,
   isInboxPushEnabled,
+  watcherBoardSyncSchema,
   type ConnectorAdapterConfig,
   type ConnectorAdapterHealth,
   type ConnectorArtifactDelivery,
@@ -25,9 +27,12 @@ import {
   type ConnectorUtaFailure,
   type ConnectorUtaPresentation,
   type ConnectorUtaRequest,
+  type ConnectorWatchAction,
+  type ConnectorWatchRequest,
   type InboxNotification,
   type InboundOwnerMessage,
   type OwnerChatMessage,
+  type WatcherBoardSync,
 } from '@traderalice/connector-protocol'
 import {
   CommandRegistry,
@@ -126,7 +131,22 @@ export class DeliveryManager {
   }
 
   async deliver(notification: InboxNotification, correlationId = `delivery-${randomUUID()}`): Promise<void> {
+    // An explicit allow-list narrows delivery; absence keeps the historical
+    // fan-out. A listed adapter that is not running is simply not delivered to.
+    const allowed = notification.deliverTo && notification.deliverTo.length > 0
+      ? new Set(notification.deliverTo)
+      : null
     await Promise.allSettled([...this.adapters.values()].map(async (adapter) => {
+      if (allowed && !allowed.has(adapter.id)) {
+        await this.record({
+          correlationId,
+          direction: 'outbound',
+          stage: 'delivery.skipped',
+          connectorId: adapter.id,
+          payload: { notificationId: notification.id, reason: 'not-targeted' },
+        })
+        return
+      }
       const settings = this.options.config.adapters[adapter.id]?.settings ?? {}
       if (!isInboxPushEnabled(settings)) {
         await this.record({
@@ -139,6 +159,31 @@ export class DeliveryManager {
         return
       }
       await this.deliverToAdapter(adapter, notification, correlationId)
+    }))
+  }
+
+  /**
+   * Fan one board state out to every adapter that renders one. A board push is
+   * a live view, not a durable message: an adapter that is down simply misses
+   * this frame and receives the next one, so nothing is queued or retried.
+   */
+  async syncWatcherBoard(board: WatcherBoardSync): Promise<void> {
+    const parsed = watcherBoardSyncSchema.parse(board)
+    await Promise.allSettled([...this.adapters.values()].map(async (adapter) => {
+      if (!adapter.syncWatcherBoard) return
+      // Inbox push governs unsolicited chat traffic. An adapter whose board is
+      // opt-in (opened by an explicit command) opts out, because a person who
+      // asked for the board should not lose it to an unrelated notification
+      // toggle. Adapters without the opt-out keep the shared gate.
+      if (!adapter.boardIgnoresInboxPush?.()) {
+        const settings = this.options.config.adapters[adapter.id]?.settings ?? {}
+        if (!isInboxPushEnabled(settings)) return
+      }
+      try {
+        await adapter.syncWatcherBoard(parsed)
+      } catch (error) {
+        console.warn(`[connector] ${adapter.id} watcher board sync failed:`, error instanceof Error ? error.message : error)
+      }
     }))
   }
 
@@ -284,6 +329,49 @@ export class DeliveryManager {
 
   claimUtaActions(limit = MAX_CONNECTOR_ACTION_REQUESTS): Promise<ConnectorWorkClaim<ConnectorUtaRequest>> {
     return this.workQueue.claim('uta', limit)
+  }
+
+  /**
+   * Enqueue an owner-initiated watcher action (delete) for Alice to perform.
+   *
+   * The connector deliberately does NOT mutate watch state: Alice owns it, and
+   * the board is a view of that state. Routing the delete through the queue
+   * keeps the watch store single-writer and means a card can never disagree
+   * with the loop about what is armed.
+   */
+  async enqueueWatchRequest(connectorId: string, input: {
+    action: ConnectorWatchAction
+    workspaceId: string
+    watcherId: string
+  }): Promise<string> {
+    const request = connectorWatchRequestSchema.parse({
+      requestId: `watch-${randomUUID()}`,
+      connectorId,
+      createdAt: new Date().toISOString(),
+      action: input.action,
+      workspaceId: input.workspaceId,
+      watcherId: input.watcherId,
+    })
+    await this.workQueue.enqueue('watch', request.requestId, request)
+    await this.record({
+      correlationId: request.requestId,
+      direction: 'inbound',
+      stage: 'action.enqueued',
+      connectorId,
+      payload: {
+        kind: 'watch',
+        requestId: request.requestId,
+        action: request.action,
+        workspaceId: request.workspaceId,
+        watcherId: request.watcherId,
+        ttlMs: CONNECTOR_ACTION_TTL_MS,
+      },
+    })
+    return request.requestId
+  }
+
+  claimWatchActions(limit = MAX_CONNECTOR_ACTION_REQUESTS): Promise<ConnectorWorkClaim<ConnectorWatchRequest>> {
+    return this.workQueue.claim('watch', limit)
   }
 
   ackActions(claimId: string, itemIds: readonly string[]): Promise<void> {
@@ -627,6 +715,7 @@ export class DeliveryManager {
       },
       enqueueArtifactRequest: (input) => this.enqueueArtifactRequest(id, input),
       enqueueUtaRequest: (input) => this.enqueueUtaRequest(id, input),
+      enqueueWatchRequest: (input) => this.enqueueWatchRequest(id, input),
     }
     // Keep a failed adapter registered. start() may record a useful degraded
     // reason; dropping it here reduced Settings to "configured but not running".

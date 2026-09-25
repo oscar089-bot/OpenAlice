@@ -22,7 +22,7 @@ TUI has no equivalent extractor yet, so headed Sessions still only write
 occupancy. The journal is not a dispatch authority. Office reads this file;
 Automation → Runs remains the current headless-task table.
 
-## One Object, Two Roles
+## One Object, Three Roles
 
 Each issue is one file:
 
@@ -30,9 +30,15 @@ Each issue is one file:
 <workspace>/.alice/issues/<id>.md
 ```
 
-- Without `when`, it is a tracked work item on the global Issue board.
+- Without `when` or `watch`, it is a tracked work item on the global Issue board.
 - With `when`, the same issue self-schedules a headless run of its owning
   Workspace.
+- With `watch`, the same issue arms a deterministic market condition; a separate
+  5-second loop wakes its owning Session when the condition first becomes true.
+
+`when` and `watch` are independent and may coexist. A calendar fire and a market
+fire share one dispatch/claim exclusion, so neither can double-dispatch the same
+Issue.
 
 There is no central issue database and no separate schedule definition. Alice
 scans every registered Workspace's live files and validates each issue in
@@ -79,6 +85,15 @@ The filename stem is the stable issue id. Frontmatter:
   - `{ kind: at, at: <ISO timestamp> }`
   - `{ kind: every, every: <duration> }`
   - `{ kind: cron, cron: <5-field expression>, timezone: local | <IANA zone> }`
+- `watch` — optional deterministic market watcher:
+  - `pair`, `assetClass`, `timeframe` (1m or larger), `direction`
+  - `rules[]` — trigger rules (`price_breaks_level`, `price_crosses_level`,
+    `candle_close`, `level_reclaim`, `level_breakdown`,
+    `liquidity_sweep_touched`, `price_enters_zone`, `price_approaches_zone`)
+  - `invalidationRules[]` — same grammar; a hit is terminal
+  - `managementRules[]` + `position` — R-multiple and unrealized-P&L checks
+  - `expiry` — optional ISO timestamp after which the watcher expires
+  - `when` and `watch` are independent and may coexist on one Issue
 - `agent` — optional CLI adapter id for `@new-then-resume` / `@new-each-run` scheduled work;
   otherwise Workspace/default resolution is used. A Session assignee already
   owns its Agent runtime and cannot be overridden here. After the first
@@ -382,6 +397,123 @@ An active peer Issue assigned to a retired `@resumeId` remains visibly owned by
 that signature but cannot fire until a human assigns an active Session or
 restores the departed Workspace. See [[docs/workspace-lifecycle.md]].
 
+## Market Watchers
+
+A `watch` on an Issue is a **deterministic market condition**, not a timer. It
+is evaluated by `WatchLoop`, a loop deliberately separate from
+`ScheduleScanner`: a slow quote fetch must never delay a calendar fire, and a
+calendar fire must never delay a market reaction.
+
+```text
+.alice/issues/<id>.md  (frontmatter `watch:` + markdown What)
+  -> WatchLoop (5s)
+  -> one market fetch per distinct pair per tick
+  -> RuleEvaluator (pure, deterministic, no LLM)
+  -> no event  -> persist state, continue
+  -> event     -> cooldown + fired-condition guard
+                  -> watcher alert (Inbox `deliverTo: ['discord', 'telegram']`)
+                  -> runWatchFire -> owning Session resumes with What + event
+                  -> model re-analyses, replies, rewrites its own Issue to re-arm
+```
+
+Key invariants:
+
+- **No agent process exists while a condition is false.** A watcher that never
+  fires costs one price lookup per tick and nothing more.
+- **The evaluator is pure.** No I/O, no clock of its own, no LLM. It takes a
+  snapshot and returns state plus events, so the hot path is testable in
+  isolation.
+- **A rule fires once.** Each rule has a stable `conditionKey`; a fired key is
+  recorded in `firedConditions` and never fires again for that spec. A
+  15-minute cooldown guards the remaining rules.
+- **A rewritten `watch:` block re-arms.** The persisted state carries a
+  fingerprint of the authored spec; a change resets state so the previous
+  phase's history cannot suppress the new rules and the candle arming guard
+  re-bases.
+- **`candle_close` only fires on confirmed candles**, and a candle that closed
+  at or before the arming time is ignored — re-arming never replays history.
+- **Invalidation rules are terminal.** The first to hit ends the watcher; the
+  loop then skips it before fetching until the model rewrites the Issue.
+- **Management rules never query the broker.** Entry, direction, stop, and
+  targets are frozen into the spec at creation, so R-multiple and P&L rules work
+  while UTA is offline.
+- **A market fire is not a calendar occurrence.** `runWatchFire` deliberately
+  does not write the last-fired marker, which would silently skip the Issue's
+  next scheduled slot.
+
+Persisted state lives in a JSON sidecar beside the Issue
+(`.alice/issues/<id>.watch.json`), never in the authored markdown: the model
+rewrites its Issue to re-arm, and runtime bookkeeping must survive that edit.
+The sidecar is written atomically (tmp + rename) and is additive — no migration
+is needed and old Workspaces read unchanged.
+
+Delivery: the machine alert is routed to **Discord and Telegram** through the
+Inbox notification's `deliverTo` allow-list. It is a SYSTEM notification — its
+body is assembled by the evaluator from the events that fired, never written by
+a model — so the operator learns a condition triggered even if the woken Session
+never replies. The Session's own analysis arrives separately through the desk
+reply. `deliverTo` is additive: absent means the historical fan-out to
+every push-enabled adapter.
+
+### Persistent watcher board
+
+The 5-second loop also publishes a **live board** to the Connector Service on
+every tick. Each armed watcher becomes one persistent chat message that is
+edited in place, so an operator can see price, trigger progress, and liveness
+without opening OpenAlice — the same readout the phone surface used before the
+watch subsystem was ported.
+
+```text
+WatchLoop.tick()
+  -> evaluate every watch, persist state
+  -> onBoard(items)  (once per tick, after evaluation)
+  -> ConnectorClient.syncWatcherBoard (loopback /v1/watcher-board/sync)
+  -> DeliveryManager.syncWatcherBoard -> adapters with a board surface
+  -> DiscordWatcherBoard: one message per watcher, edited in place
+  -> TelegramConnectorAdapter: one on-demand pager message, edited in place
+```
+
+**Telegram is on-demand, not auto-posting.** Discord pushes a card for every
+watcher as soon as the board exists. Telegram posts nothing until the operator
+runs `/watchers`, then keeps ONE message alive and edits it in place. It pages
+through the watchers one at a time (`Previous` / `Next`), with `Details` /
+`Collapse` for the current watcher's full panel, `Delete` to ask Alice to
+remove it, and `Close` to put the board away. This is deliberate: a single
+message keeps a busy board to one edit per push instead of one per watcher,
+which sits far below Telegram's per-chat edit ceiling. The board renders as
+HTML, not MarkdownV2, because prices and zone ranges like `62,900-63,250` would
+otherwise need escaping that Telegram rejects outright when missed.
+
+Unlike Discord's board, the Telegram board ignores the `inboxPush` setting: it
+exists only because the operator explicitly asked for it, so an unrelated
+notification toggle must not be able to freeze it. Adapters opt out through the
+optional `boardIgnoresInboxPush()` hook.
+
+Invariants:
+
+- **The board is a live view, not a message.** It is fire-and-forget: a disabled
+  or unreachable Connector Service misses a frame and receives the next one.
+  Nothing is queued, retried, or surfaced as an error to the loop, and a board
+  transport failure can never roll back an evaluation or a wake.
+- **Rendering is shared, not duplicated.** `renderWatcherBoardCard` lives in
+  `packages/connector-protocol/src/watcher-board.ts` and is consumed verbatim by
+  both the Discord adapter and the desktop watch panel, so the two surfaces can
+  never disagree about how close a trigger is.
+- **Message ids survive restarts.** Each board adapter persists its transport
+  identity (Discord: watcher→message map; Telegram: chat, message, pager index,
+  expanded set) in a sealed, adapter-owned store rather than connector settings,
+  so a Connector Service restart re-adopts the same messages instead of posting
+  a second copy. The store is transport state, not operator config, and must not
+  appear in the Settings UI.
+- **The board follows the loop's liveness.** A stopped loop renders `poller
+  stopped`; a tick older than twice the cadence renders `delayed`; past five
+  times it renders `stale`. A stalled watcher cannot look healthy.
+- **A terminal watcher stays visible** until the model rewrites the Issue
+  (re-arming) or marks it done, so the operator sees WHY it left the armed state.
+
+Rule grammar, authoring examples, and the re-arm discipline are taught to the
+agent in `default/skills/self-scheduling/SKILL.md`.
+
 ## Structured Runtime Output
 
 Claude Code, Codex, opencode, and Pi all emit different JSON event streams.
@@ -507,6 +639,18 @@ provenance store.
 | `src/workspaces/issues/automation-health.ts` | Live schedule/run/owner health projection |
 | `src/workspaces/issues/run-failure.ts` | Read-side scheduled-run termination explanation |
 | `src/workspaces/schedule/scanner.ts` | Workspace scan, due calculation, dispatch |
+| `src/workspaces/watch/types.ts` | Watch spec, snapshot, event, and persisted-state shapes |
+| `src/workspaces/watch/schema.ts` | Zod grammar for the `watch:` frontmatter block |
+| `src/workspaces/watch/evaluator.ts` | Pure deterministic rule evaluation and anti-spam |
+| `src/workspaces/watch/loop.ts` | 5-second watch loop, fire gate, market fetch cache |
+| `src/workspaces/watch/snapshot.ts` | Bar-layer → watcher snapshot adapter |
+| `src/workspaces/watch/store.ts` | Atomic sidecar persistence for watcher state |
+| `src/workspaces/watch/wake-prompt.ts` | Wake prompt and Discord alert construction |
+| `src/workspaces/watch/board.ts` | Watch domain → connector board projection |
+| `src/workspaces/watch/{evaluator,loop,store}.spec.ts` | Watcher unit and loop coverage |
+| `packages/connector-protocol/src/watcher-board.ts` | Shared card renderer (bar, progress, candle timer) for chat + UI |
+| `services/connector/src/adapters/discord-watcher-board.ts` | Persistent per-watcher Discord message reconciliation |
+| `src/services/connector-client/watcher-board-bridge.ts` | Fire-and-forget Alice → Connector Service board push |
 | `src/workspaces/schedule/marker-store.ts` | Atomic dispatch-cursor persistence |
 | `src/workspaces/service.ts` | Scanner composition, agent resolution, headless registry |
 | `src/workspaces/headless-task.ts` | Process lifecycle, bounded logs, live structured snapshots |

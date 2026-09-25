@@ -30,6 +30,7 @@ import type {
 import type { IssuePriority, IssueRecord, IssueStatus, IssueTimeout } from './declaration.js'
 import type { IssueComment } from './comments.js'
 import type { IssueAutomationHealth } from './automation-health.js'
+import type { WatchEvent, WatchSpec, WatchState } from '../watch/types.js'
 import { issueRunFailure, type IssueRunFailure } from './run-failure.js'
 import type { PublicSessionRuntime } from '../public-session.js'
 
@@ -61,6 +62,9 @@ export interface IssuesSnapshotIssue {
   automationHealth?: IssueAutomationHealth
   /** Adapter id when this row is that connector's phone-desk Issue. */
   connectorDesk?: string
+  /** Authored market watcher summary, present iff the Issue carries a
+   *  `watch:`. Derived from the spec alone so listing never reads sidecars. */
+  watch?: IssueWatchSummary
   /** @deprecated Dual-read of the 0.89.4 Telegram-only flag. */
   telegramConnector?: true
   /** True iff this issue's NAME (title, case-insensitive) is also used by an
@@ -159,6 +163,9 @@ export interface BoardRow {
   timeout?: IssueTimeout
   /** True iff the issue self-schedules (snapshot `when` present). */
   scheduled: boolean
+  /** Authored market watcher summary, present iff the Issue carries a
+   *  `watch:`. Detail carries the full persisted state. */
+  watch?: IssueWatchSummary
   /** Live scheduler/worker health for scheduled rows. */
   automationHealth?: IssueAutomationHealth
   workspace: { wsId: string; tag: string }
@@ -203,6 +210,7 @@ export function flattenBoardRows(snapshot: IssuesSnapshot): {
         ...(issue.effort ? { effort: issue.effort } : {}),
         ...(issue.timeout ? { timeout: issue.timeout } : {}),
         scheduled: issue.when !== undefined,
+        ...(issue.watch ? { watch: issue.watch } : {}),
         ...(issue.automationHealth ? { automationHealth: issue.automationHealth } : {}),
         workspace: { wsId: ws.wsId, tag: ws.tag },
         ...(issue.nameCollision ? { nameCollision: true } : {}),
@@ -237,8 +245,31 @@ export interface IssueFiringMarkers {
 // scheduling frontmatter, its collaboration Activity, and its independent
 // headless run history. Unlike the board list, the detail loads all three.
 
+/** Deterministic market watcher status for one Issue.
+ *
+ * `spec` is always present when the Issue carries a `watch:`; `state` and
+ * `events` come from the persisted sidecar and are absent before the first
+ * evaluation. Detail surfaces read all three; the board only needs `spec`. */
+export interface IssueWatchStatus {
+  spec: WatchSpec
+  /** Persisted runtime state, absent until the loop first evaluates. */
+  state?: WatchState | null
+  /** Recent events, oldest first. Bounded by the store. */
+  events?: WatchEvent[]
+}
+
+/** Cheap authored-spec summary for the board — no sidecar read. */
+export interface IssueWatchSummary {
+  pair: string
+  assetClass: string
+  timeframe: string
+  ruleCount: number
+  /** True once the persisted state reports a terminal outcome. */
+  terminal?: boolean
+}
+
 /** One issue's full detail fields: the board row's fields + the canonical
- * markdown What. Markers are present iff scheduled. */
+ *  markdown What. Markers are present iff scheduled. */
 export interface IssueDetailIssue {
   id: string
   title: string
@@ -258,6 +289,9 @@ export interface IssueDetailIssue {
   timeout?: IssueTimeout
   /** Optional comment-reply Input Prompt template. Omission keeps the default wrapper. */
   commentPrompt?: string
+  /** Deterministic market watcher, when the Issue carries one. Full runtime
+   *  state is detail-only; the board omits it so listing never fans out reads. */
+  watch?: IssueWatchStatus
   /** When the scanner last fired this issue (epoch ms); only for scheduled issues. */
   lastFiredAtMs?: number | null
   /** When it is next due (epoch ms); only for scheduled issues. */
@@ -455,6 +489,7 @@ export function inboxReportsForIssue(
 export function detailIssue(
   issue: IssueRecord,
   markers: IssueFiringMarkers | null,
+  watch?: IssueWatchStatus,
 ): IssueDetailIssue {
   return {
     id: issue.id,
@@ -463,6 +498,7 @@ export function detailIssue(
     status: issue.status,
     priority: issue.priority,
     assignee: issue.assignee,
+    ...(watch ? { watch } : {}),
     ...(issue.when ? { when: issue.when } : {}),
     ...(issue.agent ? { agent: issue.agent } : {}),
     ...(issue.credential ? { credential: issue.credential } : {}),
@@ -500,11 +536,22 @@ export function snapshotBoardIssue(
     ...(issue.effort ? { effort: issue.effort } : {}),
     ...(issue.timeout ? { timeout: issue.timeout } : {}),
     ...(issue.connectorDesk ? { connectorDesk: issue.connectorDesk, telegramConnector: issue.connectorDesk === 'telegram' ? true as const : undefined } : {}),
+    ...(issue.watch ? { watch: watchSummary(issue.watch) } : {}),
     ...(issue.when ? { when: issue.when } : {}),
     ...(markers ? {
       lastFiredAtMs: markers.lastFiredAtMs,
       nextDueAtMs: markers.nextDueAtMs,
       automationHealth: markers.automationHealth,
     } : {}),
+  }
+}
+
+/** Derive the cheap board badge from an authored spec — no sidecar read. */
+export function watchSummary(spec: WatchSpec): IssueWatchSummary {
+  return {
+    pair: spec.pair,
+    assetClass: spec.assetClass,
+    timeframe: spec.timeframe,
+    ruleCount: spec.rules.length + spec.managementRules.length,
   }
 }

@@ -86,6 +86,8 @@ interface IssueSpec {
   assignee?: string
   connectorDesk?: string
   body?: string
+  /** Emit a minimal valid watcher. The scanner only needs the field to exist. */
+  watch?: boolean
 }
 
 /** Serialize one issue spec to its `.alice/issues/<id>.md` frontmatter form. */
@@ -101,6 +103,13 @@ function issueMd(spec: IssueSpec): string {
   if (spec.effort) lines.push(`effort: ${spec.effort}`)
   if (spec.timeout) lines.push(`timeout: ${spec.timeout}`)
   if (spec.connectorDesk) lines.push(`connectorDesk: ${spec.connectorDesk}`)
+  if (spec.watch) {
+    lines.push('watch:')
+    lines.push('  pair: BTC-USDT')
+    lines.push('  timeframe: 1h')
+    lines.push('  rules:')
+    lines.push('    - { type: price_breaks_level, side: above, level: 100 }')
+  }
   // Scanner tests exercise dispatch policy, not declaration defaults. Keep the
   // historical fresh-every-fire fixture explicit now that omitted scheduled
   // ownership means recruit once (`@new-then-resume`).
@@ -196,6 +205,78 @@ describe('ScheduleScanner', () => {
         kind: 'connector-cron-issue',
         connectorId: 'telegram',
       },
+    })
+  })
+
+  it('dispatches a watch fire with watch metadata and does not advance the schedule marker', async () => {
+    const ws = await makeWs('w1', [{
+      id: 'btc-watch',
+      title: 'BTC watch',
+      when: { kind: 'every', every: '1h' },
+      what: 'Re-analyse.',
+      assignee: '@resume-owner-a1b2c3',
+    }])
+    const markers = new FakeMarkers()
+    const { scanner, dispatch } = scannerFor([ws], {
+      markers,
+      resolveAdapter: () => headlessAdapter,
+    })
+
+    await scanner.runWatchFire({
+      workspaceId: 'w1',
+      issueId: 'btc-watch',
+      prompt: 'A market watcher fired.\n\nRe-analyse.',
+      conditionKey: 'TRIGGER_HIT:price_breaks_level:above:100',
+      eventType: 'TRIGGER_HIT',
+    })
+
+    // The run carries the market cause, while remaining an ordinary Issue run.
+    expect(vi.mocked(dispatch).mock.calls[0]?.[4]).toEqual({
+      kind: 'issue',
+      workspaceId: 'w1',
+      issueId: 'btc-watch',
+      metadata: {
+        kind: 'watch',
+        conditionKey: 'TRIGGER_HIT:price_breaks_level:above:100',
+        eventType: 'TRIGGER_HIT',
+      },
+    })
+    // Ownership is re-read from disk: the exact @resumeId owner is resumed.
+    expect(vi.mocked(dispatch).mock.calls[0]?.[5]).toBe('resume-owner-a1b2c3')
+    // A market fire is not a calendar occurrence. Writing the marker would
+    // silently skip the Issue's next scheduled slot.
+    expect(markers.get('w1', 'btc-watch')).toBeUndefined()
+  })
+
+  it('routes a watch fire onto the current owner after a first-session claim', async () => {
+    const ws = await makeWs('w1', [{
+      id: 'sol-watch',
+      title: 'SOL watch',
+      what: 'Re-analyse.',
+      watch: true,
+      assignee: '@new-then-resume',
+    }])
+    const { scanner, dispatch } = scannerFor([ws], {
+      claimFreshSession: async () => undefined,
+      resolveAdapter: () => headlessAdapter,
+    })
+
+    await scanner.runWatchFire({
+      workspaceId: 'w1',
+      issueId: 'sol-watch',
+      prompt: 'A market watcher fired.',
+      conditionKey: 'TRIGGER_HIT:price_breaks_level:above:200',
+      eventType: 'TRIGGER_HIT',
+    })
+
+    // No concrete owner yet: the claim policy recruits one fresh Session.
+    expect(vi.mocked(dispatch).mock.calls[0]?.[5]).toBeUndefined()
+    // The birth records the market cause, so the Session roster shows a watch
+    // fire rather than an ordinary schedule.
+    expect(vi.mocked(dispatch).mock.calls[0]?.[9]).toMatchObject({
+      kind: 'issue',
+      policy: 'new-then-resume',
+      fire: 'watch',
     })
   })
 

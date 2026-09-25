@@ -21,7 +21,16 @@ export type HeadlessProgressToolStatus = 'running' | 'completed' | 'failed'
 
 export type HeadlessProgressBlock =
   | { readonly type: 'text'; readonly text: string }
-  | { readonly type: 'tool'; readonly id: string; readonly name: string; readonly status: HeadlessProgressToolStatus }
+  | {
+      readonly type: 'tool'
+      readonly id: string
+      readonly name: string
+      readonly status: HeadlessProgressToolStatus
+      /** Wall-clock ms from start to finish. Absent while still running. */
+      readonly durationMs?: number
+      /** One-line failure reason. Set only when `status === 'failed'`. */
+      readonly error?: string
+    }
   | { readonly type: 'error'; readonly message: string }
 
 export interface HeadlessTurnProgress {
@@ -61,6 +70,8 @@ export function projectTurnProgress(
       id: clipUtf8(block.id, MAX_PROGRESS_LABEL_BYTES),
       name: clipUtf8(block.name, MAX_PROGRESS_LABEL_BYTES),
       status: block.status,
+      ...(typeof block.durationMs === 'number' ? { durationMs: block.durationMs } : {}),
+      ...(block.error ? { error: clipUtf8(block.error, MAX_PROGRESS_ERROR_BYTES) } : {}),
     }]
   })
   const blockLimited = blocks.length <= MAX_PROGRESS_BLOCKS

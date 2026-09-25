@@ -8,7 +8,7 @@ import { grokAdapter } from './adapters/grok.js'
 import { opencodeAdapter } from './adapters/opencode.js'
 import { piAdapter } from './adapters/pi.js'
 import type { CliAdapter } from './cli-adapter.js'
-import { parseHeadlessOutputText } from './headless-output.js'
+import { parseHeadlessOutputText, HeadlessOutputAccumulator } from './headless-output.js'
 
 function parse(
   adapter: CliAdapter,
@@ -20,6 +20,11 @@ function parse(
     extractEvents: adapter.extractHeadlessOutputEvents?.bind(adapter),
     extractAssistantText: adapter.extractHeadlessAssistantText?.bind(adapter),
     sourceTruncated,
+    // Fixed clock. Duration IS measured, but it is wall-clock and therefore not
+    // reproducible in CI; pinning the clock keeps these assertions about block
+    // CONTENT rather than about how fast the test machine is. Duration
+    // measurement has its own test below.
+    now: () => 1_000,
   })
 }
 
@@ -98,6 +103,8 @@ describe('headless structured output', () => {
         type: 'tool', id: 'call-live', name: 'Read', status: 'failed',
         input: { file_path: '/workspace/AGENTS.md', limit: 1, pages: '' },
         output: '<tool_use_error>Invalid pages parameter</tool_use_error>',
+        // A failure now carries its reason, so the chat line can say WHY.
+        error: '<tool_use_error>Invalid pages parameter</tool_use_error>',
       },
       { type: 'text', text: 'CLAUDE_ASYNC_RUN_OK' },
     ])
@@ -405,10 +412,30 @@ describe('headless structured output', () => {
         status: 'failed',
         input: { command: 'false' },
         output: 'exit: 1\n',
+        error: 'exit: 1',
       },
       { type: 'error', message: 'Grok stopped: aborted' },
     ])
     expect(output.metrics).toEqual({ textBlocks: 0, toolCalls: 1, toolFailures: 1 })
+  })
+
+  // Duration is measured, so it gets its own test with a controllable clock
+  // rather than being pinned in the content assertions above.
+  it('measures tool duration from start to finish and omits it when unmeasurable', () => {
+    let clock = 10_000
+    const acc = new HeadlessOutputAccumulator(() => clock)
+    acc.add([{ type: 'tool-start', id: 'a', name: 'Bash' }])
+    clock = 11_250
+    acc.add([{ type: 'tool-finish', id: 'a', name: 'Bash', output: 'ok' }])
+    // Same-tick start/finish cannot be distinguished from instant, so it is
+    // omitted rather than reported as `(0s)`.
+    acc.add([{ type: 'tool-start', id: 'b', name: 'Read' }])
+    acc.add([{ type: 'tool-finish', id: 'b', name: 'Read', output: 'ok' }])
+
+    const blocks = acc.snapshot().blocks
+    expect(blocks[0]).toMatchObject({ id: 'a', status: 'completed', durationMs: 1_250 })
+    expect(blocks[1]).toMatchObject({ id: 'b', status: 'completed' })
+    expect(blocks[1]).not.toHaveProperty('durationMs')
   })
 
   it('normalizes Pi execution events and failed tools', () => {

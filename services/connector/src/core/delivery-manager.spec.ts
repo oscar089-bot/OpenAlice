@@ -461,6 +461,101 @@ describe('DeliveryManager connector registry', () => {
     await manager.stop()
   })
 
+  it('delivers only to adapters named by the notification allow-list', async () => {
+    const create = (id: string) => {
+      const deliver = vi.fn(async () => undefined)
+      return { id, deliver }
+    }
+    const alpha = create('alpha')
+    const discord = create('discord')
+    const registry = new ConnectorRegistry()
+    for (const adapter of [alpha, discord]) {
+      registry.register({
+        definition: { id: adapter.id, label: adapter.id, description: `${adapter.id} adapter.`, fields: [], commands: [] },
+        create: () => ({
+          id: adapter.id,
+          start: async () => undefined,
+          stop: async () => undefined,
+          deliver: adapter.deliver,
+          sendOwnerText: async () => undefined,
+          health: () => ({ id: adapter.id, enabled: true, status: 'healthy' as const }),
+        }),
+      })
+    }
+    const manager = new DeliveryManager({
+      registry,
+      config: {
+        version: 1,
+        adapters: {
+          alpha: { enabled: true, settings: { inboxPush: true } },
+          discord: { enabled: true, settings: { inboxPush: true } },
+        },
+      },
+      updateAdapterSettings: vi.fn(),
+    })
+    await manager.start()
+
+    // A watcher alert targets Discord only; a private chat must not receive it.
+    await manager.deliver({
+      id: 'inbox-watch',
+      createdAt: new Date().toISOString(),
+      workspaceId: 'ws-1',
+      title: 'Watcher fired',
+      body: '',
+      deliverTo: ['discord'],
+    })
+
+    expect(discord.deliver).toHaveBeenCalledOnce()
+    expect(alpha.deliver).not.toHaveBeenCalled()
+    await manager.stop()
+  })
+
+  it('keeps the historical fan-out when no allow-list is present', async () => {    const create = (id: string) => {
+      const deliver = vi.fn(async () => undefined)
+      return { id, deliver }
+    }
+    const alpha = create('alpha')
+    const beta = create('beta')
+    const registry = new ConnectorRegistry()
+    for (const adapter of [alpha, beta]) {
+      registry.register({
+        definition: { id: adapter.id, label: adapter.id, description: `${adapter.id} adapter.`, fields: [], commands: [] },
+        create: () => ({
+          id: adapter.id,
+          start: async () => undefined,
+          stop: async () => undefined,
+          deliver: adapter.deliver,
+          sendOwnerText: async () => undefined,
+          health: () => ({ id: adapter.id, enabled: true, status: 'healthy' as const }),
+        }),
+      })
+    }
+    const manager = new DeliveryManager({
+      registry,
+      config: {
+        version: 1,
+        adapters: {
+          alpha: { enabled: true, settings: { inboxPush: true } },
+          beta: { enabled: true, settings: { inboxPush: true } },
+        },
+      },
+      updateAdapterSettings: vi.fn(),
+    })
+    await manager.start()
+
+    await manager.deliver({
+      id: 'inbox-plain',
+      createdAt: new Date().toISOString(),
+      workspaceId: 'ws-1',
+      title: 'Ordinary Inbox item',
+      body: '',
+    })
+
+    expect(alpha.deliver).toHaveBeenCalledOnce()
+    expect(beta.deliver).toHaveBeenCalledOnce()
+    await manager.stop()
+  })
+
   it('contains asynchronous owner-chat failures after accepting the projection', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     const registry = new ConnectorRegistry()
@@ -956,4 +1051,84 @@ it('shares terminal ordering and renewable activity leases across adapters', asy
     await vi.advanceTimersByTimeAsync(2000)
     expect(adapter.stopOwnerActivity).toHaveBeenCalledTimes(2)
   } finally { await manager.stop(); vi.useRealTimers() }
+})
+
+function boardSync() {
+  return {
+    refreshSeconds: 5,
+    items: [{
+      watcherId: 'w-1',
+      workspaceId: 'ws-1',
+      title: 'BTC setup',
+      running: true,
+      pollable: true,
+      pollSeconds: 5,
+      spec: { pair: 'BTCUSDT' },
+      state: {},
+      nowIso: new Date().toISOString(),
+    }],
+  }
+}
+
+function boardRegistry(options: { ignoresInboxPush?: boolean } = {}) {
+  const syncWatcherBoard = vi.fn(async () => undefined)
+  const registry = new ConnectorRegistry()
+  registry.register({
+    definition: { id: 'boarded', label: 'Boarded', description: 'Board adapter.', fields: [], commands: [] },
+    create: () => ({
+      id: 'boarded',
+      start: async () => undefined,
+      stop: async () => undefined,
+      deliver: async () => undefined,
+      sendOwnerText: async () => undefined,
+      syncWatcherBoard,
+      ...(options.ignoresInboxPush ? { boardIgnoresInboxPush: () => true } : {}),
+      health: () => ({ id: 'boarded', enabled: true, status: 'healthy' as const }),
+    }),
+  })
+  return { registry, syncWatcherBoard }
+}
+
+describe('watcher board fan-out gate', () => {
+  it('skips a board whose adapter obeys the Inbox-push toggle', async () => {
+    const { registry, syncWatcherBoard } = boardRegistry()
+    const manager = new DeliveryManager({
+      registry,
+      config: { version: 1, adapters: { boarded: { enabled: true, settings: { inboxPush: false } } } },
+      updateAdapterSettings: vi.fn(),
+    })
+    await manager.start()
+    await manager.syncWatcherBoard(boardSync())
+    // The shared gate still governs an auto-posting board such as Discord's.
+    expect(syncWatcherBoard).not.toHaveBeenCalled()
+    await manager.stop()
+  })
+
+  it('keeps an opted-out board alive while Inbox push is off', async () => {
+    const { registry, syncWatcherBoard } = boardRegistry({ ignoresInboxPush: true })
+    const manager = new DeliveryManager({
+      registry,
+      config: { version: 1, adapters: { boarded: { enabled: true, settings: { inboxPush: false } } } },
+      updateAdapterSettings: vi.fn(),
+    })
+    await manager.start()
+    await manager.syncWatcherBoard(boardSync())
+    // A board the operator opened explicitly must not die with a notification
+    // preference it has nothing to do with.
+    expect(syncWatcherBoard).toHaveBeenCalledOnce()
+    await manager.stop()
+  })
+
+  it('still fans out when Inbox push is on', async () => {
+    const { registry, syncWatcherBoard } = boardRegistry()
+    const manager = new DeliveryManager({
+      registry,
+      config: { version: 1, adapters: { boarded: { enabled: true, settings: { inboxPush: true } } } },
+      updateAdapterSettings: vi.fn(),
+    })
+    await manager.start()
+    await manager.syncWatcherBoard(boardSync())
+    expect(syncWatcherBoard).toHaveBeenCalledOnce()
+    await manager.stop()
+  })
 })

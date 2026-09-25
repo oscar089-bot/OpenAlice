@@ -43,6 +43,7 @@ function context() {
     forwardOwnerText: async () => undefined,
     enqueueArtifactRequest: async () => 'art-test',
     enqueueUtaRequest: async () => 'uta-test',
+    enqueueWatchRequest: async () => 'watch-test',
   }
 }
 

@@ -53,6 +53,16 @@ export function issueAutomationOwnerState(
   return assigneeSession?.state ?? 'missing'
 }
 
+/** Liveness of a deterministic market watcher, as persisted by the watch loop.
+ *  Structural (no watch import) so this module stays dependency-free. */
+export interface IssueWatchHealthInput {
+  terminal: boolean
+  lastChecked: string | null
+  lastError: string | null
+  errorCount: number
+  backoffUntil: string | null
+}
+
 export interface IssueAutomationHealthInput {
   status: IssueStatus
   nowMs: number
@@ -61,6 +71,19 @@ export interface IssueAutomationHealthInput {
   /** Effective runtime after resolving exact Session, Issue override, then Workspace default. */
   runtime?: { agent: string; displayName: string; installed: boolean }
   latestRun?: { taskId: string; status: HeadlessTaskStatus; failure?: IssueRunFailure }
+  /** Present when the Issue carries a `watch:`. A watched Issue has no calendar
+   *  fire, so its liveness comes from the watch loop's persisted state instead
+   *  of `nextDueAtMs`. */
+  watch?: IssueWatchHealthInput
+  /** Effective watch-loop cadence, supplied by the caller that owns the loop.
+   *
+   *  Passed in rather than imported so this module keeps its documented
+   *  dependency-free, structural design. It exists because the healthy message
+   *  used to hardcode "every 30 seconds" while the loop had already moved to 5s
+   *  — a number that must come from the real loop or it drifts again. Omitted
+   *  means the caller does not know the cadence, and the message says so
+   *  without inventing an interval. */
+  watchIntervalSeconds?: number
 }
 
 /** Resolve the Agent whose executable will service the next scheduled fire.
@@ -136,6 +159,37 @@ export function issueAutomationHealth(input: IssueAutomationHealthInput): IssueA
       message: latest.failure?.message ?? 'Latest scheduled run failed. Inspect its Runs entry, then retry when ready.',
       latestTaskId: latest.taskId,
     }
+  }
+  // A watched Issue has no calendar slot; its liveness is the watch loop. This
+  // must precede the null-`nextDueAtMs` check, which would otherwise report a
+  // healthy watcher as a schedule with no future fire.
+  if (input.watch) {
+    const w = input.watch
+    if (w.terminal) {
+      return withLatest({ state: 'inactive', message: 'Watcher finished. Rewrite its watch to re-arm for the next phase.' })
+    }
+    if (w.errorCount > 0) {
+      const backoffMs = w.backoffUntil ? Date.parse(w.backoffUntil) : Number.NaN
+      const backingOff = Number.isFinite(backoffMs) && backoffMs > input.nowMs
+      return withLatest({
+        state: 'failed',
+        message: w.lastError
+          ? `${w.lastError}${backingOff ? ' Retrying with backoff.' : ''}`
+          : 'The latest market check failed.',
+      })
+    }
+    if (!w.lastChecked) {
+      return withLatest({ state: 'not_started', message: 'Watcher armed and waiting for its first market check.' })
+    }
+    // Derived from the loop's own cadence rather than hardcoded, so this
+    // operator-facing sentence can never drift from the real poll interval.
+    const seconds = input.watchIntervalSeconds
+    return withLatest({
+      state: 'healthy',
+      message: seconds !== undefined && Number.isFinite(seconds) && seconds > 0
+        ? `Watcher is armed and checks the market every ${seconds} seconds.`
+        : 'Watcher is armed and checks the market on its polling interval.',
+    })
   }
   if (input.nextDueAtMs === null) {
     return withLatest({ state: 'blocked', message: 'Schedule has no future fire. Check its expression and timestamp.' })

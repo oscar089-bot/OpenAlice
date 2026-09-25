@@ -9,6 +9,7 @@ import type {
   ConnectorUtaPresentation,
   InboxNotification,
   OwnerChatMessage,
+  WatcherBoardSync,
 } from '@traderalice/connector-protocol'
 import { randomUUID } from 'node:crypto'
 import {
@@ -45,6 +46,12 @@ export interface ConnectorAdapterContext {
     utaId?: string
     pendingHash?: string
   }): Promise<string>
+  /** Enqueue an owner-initiated watcher action (delete) for Alice to perform. */
+  enqueueWatchRequest(input: {
+    action: import('@traderalice/connector-protocol').ConnectorWatchAction
+    workspaceId: string
+    watcherId: string
+  }): Promise<string>
 }
 
 export interface ConnectorAdapter {
@@ -68,6 +75,18 @@ export interface ConnectorAdapter {
   /** Directed UTA review panel. Must not send an Inbox summary. */
   presentUta?(presentation: ConnectorUtaPresentation): Promise<void>
   failUta?(failure: ConnectorUtaFailure): Promise<void>
+  /**
+   * Reconcile this adapter's persistent watcher board against Alice's current
+   * watch state. Adapters without a board surface simply omit this method; the
+   * DeliveryManager skips them.
+   */
+  syncWatcherBoard?(board: WatcherBoardSync): Promise<void>
+  /**
+   * True when this adapter's board is opened by an explicit command and should
+   * therefore survive the Inbox-push toggle. Absent means the board obeys the
+   * shared gate, which is what the auto-posting Discord board does.
+   */
+  boardIgnoresInboxPush?(): boolean
   health(): ConnectorAdapterHealth
 }
 

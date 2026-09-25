@@ -24,6 +24,17 @@ Thumbs.db
 /*.tgz
 /vendor/
 
+# Python bytecode — skills ship .py sources into every Workspace; the Alice
+# Harness version fingerprint walks every file in a skill tree, so a stray
+# .pyc would both perturb the revision and get copied into Workspaces.
+__pycache__/
+*.pyc
+
+# Skill-provisioned Python environments live under the user-state root, which
+# is the checkout itself when OPENALICE_HOME is pinned there
+# (`OPENALICE_HOME=$PWD pnpm dev`). Never inside a skill tree.
+/tools/*-venv/
+
 # Test
 coverage/
 

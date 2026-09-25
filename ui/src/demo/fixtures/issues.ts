@@ -5,6 +5,7 @@ import type {
   IssuePatch,
   IssueRunRecord,
   IssueSnapshot,
+  IssueWatchStatus,
 } from '../../api/issues'
 import { demoInboxEntries } from './inbox'
 import { demoTurnProgress } from './turn-progress'
@@ -55,7 +56,7 @@ export const demoIssuesSnapshot: IssueSnapshot = {
           nextDueAtMs: now + 16 * HOUR,
           automationHealth: { state: 'running', message: 'A scheduled run is in progress.', latestTaskId: 'demo-run-morning-1' },
         },
-        // Scheduled (every) + urgent.
+        // Scheduled (every) + urgent, and carrying a deterministic watcher.
         {
           id: 'thesis-watch',
           title: 'Thesis invalidation watch',
@@ -63,6 +64,7 @@ export const demoIssuesSnapshot: IssueSnapshot = {
           priority: 'urgent',
           assignee: '@resume-demo-thesis-owner',
           when: { kind: 'every', every: '1h' },
+          watch: { pair: 'VST', assetClass: 'equity', timeframe: '1d', ruleCount: 1 },
           lastFiredAtMs: now - HOUR / 2,
           nextDueAtMs: now + HOUR / 2,
           automationHealth: {
@@ -187,6 +189,8 @@ interface IssueDetailExtras {
   agent?: string
   /** Comment-reply Input Prompt template, if set. */
   commentPrompt?: string
+  /** Deterministic market watcher status, if the Issue carries a `watch:`. */
+  watch?: IssueWatchStatus
   /** This issue's headless runs, newest-first (Activity feed). */
   runs: IssueRunRecord[]
 }
@@ -286,6 +290,39 @@ const demoIssueExtras: Record<string, IssueDetailExtras> = {
       're-checks every one against the latest quote and flags breaches.',
     ].join('\n'),
     agent: 'claude',
+    watch: {
+      spec: {
+        pair: 'VST',
+        assetClass: 'equity',
+        direction: 'LONG',
+        timeframe: '1d',
+        rules: [{ type: 'price_breaks_level', side: 'below', level: 118 }],
+        invalidationRules: [],
+        managementRules: [],
+      },
+      state: {
+        armedAt: new Date(now - 2 * DAY).toISOString(),
+        specFingerprint: 'demo',
+        // Fresh on purpose: the watch loop ticks every 5s, and the panel now
+        // treats a check older than ~30s as stalled. A demo watcher left at
+        // 90s would render as stale and misrepresent a healthy state.
+        lastChecked: new Date(now - 4_000).toISOString(),
+        lastPrice: 131.4,
+        lastMarketTimestamp: new Date(now - 4_000).toISOString(),
+        lastConfirmedCandle: null,
+        previousConfirmedCandle: null,
+        lastEvent: null,
+        terminal: false,
+        alertedConditions: {},
+        firedConditions: {},
+        cooldownUntil: null,
+        backoffUntil: null,
+        pollCount: 812,
+        errorCount: 0,
+        lastError: null,
+      },
+      events: [],
+    },
     runs: [
       {
         taskId: 'demo-run-thesis-1',
@@ -480,12 +517,16 @@ export function demoIssueDetail(wsId: string, id: string): IssueDetail | null {
   const assigneeResumeId = boardIssue.assignee.startsWith('@resume-')
     ? boardIssue.assignee.slice(1)
     : null
+  // The board row's `watch` is the cheap summary; detail carries the full
+  // status. Strip the summary so the spread cannot leak the narrower shape.
+  const { watch: _boardWatch, ...boardDetailFields } = boardIssue
   return {
     issue: {
-      ...boardIssue,
+      ...boardDetailFields,
       what,
       ...(extras?.agent ? { agent: extras.agent } : {}),
       ...(extras?.commentPrompt ? { commentPrompt: extras.commentPrompt } : {}),
+      ...(extras?.watch ? { watch: extras.watch } : {}),
     },
     ...(assigneeResumeId
       ? { assigneeSession: demoAssigneeSession(assigneeResumeId) }
@@ -555,6 +596,26 @@ export function demoIssueUpdate(
       else existing.commentPrompt = patch.commentPrompt
     } else if (patch.commentPrompt !== null) {
       demoIssueExtras[key] = { body: '', commentPrompt: patch.commentPrompt, runs: [] }
+    }
+  }
+  if (patch.watch !== undefined) {
+    const key = `${wsId}/${id}`
+    const existing = demoIssueExtras[key]
+    if (patch.watch === null) {
+      // Clearing drops the authored field AND the persisted state, matching
+      // the server's sidecar removal.
+      delete boardIssue.watch
+      if (existing) delete existing.watch
+    } else {
+      const status: IssueWatchStatus = { spec: patch.watch, state: null, events: [] }
+      boardIssue.watch = {
+        pair: patch.watch.pair,
+        assetClass: patch.watch.assetClass,
+        timeframe: patch.watch.timeframe,
+        ruleCount: patch.watch.rules.length + patch.watch.managementRules.length,
+      }
+      if (existing) existing.watch = status
+      else demoIssueExtras[key] = { body: boardIssue.title, watch: status, runs: [] }
     }
   }
   if (patch.agent !== undefined) {

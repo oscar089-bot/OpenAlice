@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { GrammyError } from 'grammy'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { InboxNotification } from '@traderalice/connector-protocol'
 import { CommandRegistry } from '../core/adapter.js'
@@ -18,6 +19,8 @@ const sendMessage = vi.fn(async () => undefined)
 const sendPhoto = vi.fn(async () => undefined)
 const sendSticker = vi.fn(async () => undefined)
 const sendDocument = vi.fn(async () => undefined)
+const editMessageText = vi.fn(async () => undefined)
+const deleteMessage = vi.fn(async () => undefined)
 
 vi.mock('grammy', async (importOriginal) => {
   const actual = await importOriginal<typeof import('grammy')>()
@@ -36,6 +39,8 @@ vi.mock('grammy', async (importOriginal) => {
         sendDocument,
         sendPhoto,
         sendSticker,
+        editMessageText,
+        deleteMessage,
       }
       command(name: string, handler: (ctx: any) => Promise<void>) { handlers.set(name, handler) }
       on(name: string, handler: (ctx: any) => Promise<void>) { handlers.set(name, handler) }
@@ -63,6 +68,7 @@ function context() {
     forwardOwnerText: async () => undefined,
     enqueueArtifactRequest: async () => 'art-test',
     enqueueUtaRequest: async () => 'uta-test',
+    enqueueWatchRequest: async () => 'watch-test',
   }
 }
 
@@ -107,6 +113,10 @@ describe('Telegram polling readiness', () => {
     sendChatAction.mockResolvedValue(true)
     sendMessage.mockReset()
     sendDocument.mockReset()
+    editMessageText.mockReset()
+    editMessageText.mockResolvedValue(undefined)
+    deleteMessage.mockReset()
+    deleteMessage.mockResolvedValue(undefined)
     stopMock.mockResolvedValue(undefined)
     sendRichMessage.mockResolvedValue(undefined)
     sendMessage.mockResolvedValue(undefined)
@@ -332,15 +342,128 @@ describe('Telegram rich outbound text', () => {
     })
 
     const draftId = expect.any(Number)
-    expect(sendMessageDraft).toHaveBeenCalledWith(99, draftId, '')
-    expect(sendRichMessageDraft).toHaveBeenCalledWith(99, draftId, { markdown: 'Checking the market.' })
-    expect(sendRichMessageDraft).toHaveBeenCalledTimes(1)
+    // Acceptance seeds the slot with a live "Thinking" state, so the gap before
+    // the model's first token is not dead air.
+    expect(sendRichMessageDraft).toHaveBeenNthCalledWith(1, 99, draftId, {
+      markdown: expect.stringContaining('Thinking'),
+    })
+    // Narration then replaces that activity in the SAME slot — one message, not
+    // a durable fragment per narration chunk.
+    expect(sendRichMessageDraft).toHaveBeenLastCalledWith(99, draftId, { markdown: 'Checking the market.' })
     expect(sendRichMessage).toHaveBeenCalledWith('99', { markdown: 'The market is quiet.' })
     await adapter.stop()
   })
 
-  it('keeps working activity through multiple text/tool pauses and ends silently', async () => {
+  it('renders live tool activity into the ephemeral slot and drops it on the final reply', async () => {
     const adapter = new TelegramConnectorAdapter({ attemptTimeoutMs: 200, reconnectDelayMs: 20 })
+    await startUntilReady(adapter, { botToken: 'token', ownerUserId: '42', chatId: '99' })
+    vi.useFakeTimers()
+    try {
+      await adapter.sendOwnerChat({ id: 'a', adapterId: 'telegram', conversationId: 'turn', phase: 'accepted' })
+      await adapter.sendOwnerChat({
+        id: 'p1', adapterId: 'telegram', conversationId: 'turn', phase: 'progress',
+        activity: { toolCalls: 1, toolFailures: 0, currentTool: 'read_file' },
+      })
+      const latest = (): string => {
+        const call = sendRichMessageDraft.mock.calls.at(-1) as unknown as
+          | [number, number, { markdown: string }]
+          | undefined
+        return call?.[2]?.markdown ?? ''
+      }
+      // The headline names the channel in a shell prompt, so a watcher can tell
+      // a shell command from a file read at a glance.
+      expect(latest()).toContain('alice@{read}:~$')
+      expect(latest()).toContain('Running\u2026')
+      expect(latest()).toContain('1 tool')
+
+      // The spinner advances on the adapter's own tick rather than on Alice's
+      // 1s-debounced payload, so one long tool call still reads as alive.
+      // Telegram's ~1 edit/sec limit is why the cadence is 1.2s, not faster.
+      const beforeTick = latest()
+      await vi.advanceTimersByTimeAsync(1_300)
+      expect(latest()).not.toBe(beforeTick)
+      expect(latest()).toContain('alice@{read}:~$')
+
+      // The final reply ends the ephemeral slot: nothing is left behind above it.
+      await adapter.sendOwnerChat({
+        id: 'end', adapterId: 'telegram', conversationId: 'turn', phase: 'final', text: 'Done.',
+      })
+      expect(sendRichMessage).toHaveBeenCalledWith('99', { markdown: 'Done.' })
+      // The typed indicator is throttled separately from frames, so it must not
+      // be re-sent on every 1.2s animation tick.
+      const afterFinal = sendChatAction.mock.calls.length
+      await vi.advanceTimersByTimeAsync(12_000)
+      expect(sendChatAction).toHaveBeenCalledTimes(afterFinal)
+    } finally {
+      vi.useRealTimers()
+      await adapter.stop()
+    }
+  })
+
+  // The tool log is the reason this readout exists: a bare count cannot say
+  // WHICH tool ran. Several calls must all appear, in order, each with its own
+  // outcome — the old readout showed one and looked stuck.
+  it('lists every tool call the model ran, not just the current one', async () => {
+    const adapter = new TelegramConnectorAdapter({ attemptTimeoutMs: 200, reconnectDelayMs: 20 })
+    await startUntilReady(adapter, { botToken: 'token', ownerUserId: '42', chatId: '99' })
+    vi.useFakeTimers()
+    try {
+      await adapter.sendOwnerChat({ id: 'a', adapterId: 'telegram', conversationId: 'turn', phase: 'accepted' })
+      await adapter.sendOwnerChat({
+        id: 'p1', adapterId: 'telegram', conversationId: 'turn', phase: 'progress',
+        activity: {
+          toolCalls: 3,
+          toolFailures: 1,
+          currentTool: 'write_file',
+          recentTools: [
+            { name: 'read_file', status: 'completed', durationMs: 420 },
+            { name: 'Bash', status: 'failed', durationMs: 1_200, error: 'exit code 1' },
+            { name: 'write_file', status: 'running' },
+          ],
+        },
+      })
+      const latest = (): string => {
+        const call = sendRichMessageDraft.mock.calls.at(-1) as unknown as
+          | [number, number, { markdown: string }]
+          | undefined
+        return call?.[2]?.markdown ?? ''
+      }
+      // Headline names the in-flight tool, and the count is present.
+      expect(latest()).toContain('alice@{write}:~$')
+      expect(latest()).toContain('3 tools \u00B7 1 failed')
+      // All THREE calls are listed, including the two already finished.
+      expect(latest()).toContain('Reading a file')
+      expect(latest()).toContain('Running a command')
+      expect(latest()).toContain('Writing a file')
+      // The failure carries its reason, so "1 failed" is actionable.
+      expect(latest()).toContain('exit code 1')
+    } finally {
+      vi.useRealTimers()
+      await adapter.stop()
+    }
+  })
+
+  // Before any tool runs, the slot is only the spinner — no bar, no counters.
+  it('shows only the thinking spinner before the first tool call', async () => {
+    const adapter = new TelegramConnectorAdapter({ attemptTimeoutMs: 200, reconnectDelayMs: 20 })
+    await startUntilReady(adapter, { botToken: 'token', ownerUserId: '42', chatId: '99' })
+    vi.useFakeTimers()
+    try {
+      await adapter.sendOwnerChat({ id: 'a', adapterId: 'telegram', conversationId: 'turn', phase: 'accepted' })
+      const call = sendRichMessageDraft.mock.calls.at(-1) as unknown as
+        | [number, number, { markdown: string }]
+        | undefined
+      const markdown = call?.[2]?.markdown ?? ''
+      expect(markdown).toContain('Thinking')
+      expect(markdown).not.toContain('tool')
+      expect(markdown.split('\n')).toHaveLength(1)
+    } finally {
+      vi.useRealTimers()
+      await adapter.stop()
+    }
+  })
+
+  it('keeps working activity through multiple text/tool pauses and ends silently', async () => {    const adapter = new TelegramConnectorAdapter({ attemptTimeoutMs: 200, reconnectDelayMs: 20 })
     await startUntilReady(adapter, { botToken: 'token', ownerUserId: '42', chatId: '99' })
     vi.useFakeTimers()
     try {
@@ -384,15 +507,18 @@ describe('Telegram rich outbound text', () => {
       await adapter.sendOwnerChat({
         id: 'accepted-1', adapterId: 'telegram', conversationId: 'comment-1', phase: 'accepted',
       })
-      expect(sendMessageDraft).toHaveBeenCalledTimes(1)
+      expect(sendRichMessageDraft).toHaveBeenCalledTimes(1)
+      // Activity re-renders on its own shorter cadence than narration, which is
+      // what keeps the bar moving through one long tool call.
       await vi.advanceTimersByTimeAsync(20_000)
-      expect(sendMessageDraft).toHaveBeenCalledTimes(2)
+      expect(sendRichMessageDraft.mock.calls.length).toBeGreaterThan(1)
 
       await adapter.sendOwnerChat({
         id: 'final-1', adapterId: 'telegram', conversationId: 'comment-1', phase: 'final', text: 'Done.',
       })
+      const afterFinal = sendRichMessageDraft.mock.calls.length
       await vi.advanceTimersByTimeAsync(20_000)
-      expect(sendMessageDraft).toHaveBeenCalledTimes(2)
+      expect(sendRichMessageDraft).toHaveBeenCalledTimes(afterFinal)
     } finally {
       vi.useRealTimers()
       await adapter.stop()
@@ -526,4 +652,146 @@ it('reports when the owner has nothing to stop', async () => {
     await handlers.get('stop')!({ chat: { id: 42, type: 'private' }, from: { id: 42 }, reply })
     expect(reply).toHaveBeenCalledWith('No Agent reply is running for this chat.')
   } finally { await adapter.stop() }
+})
+
+// "message is not modified" is a success Telegram reports as an error.
+function notModifiedError() {
+  return new GrammyError("Call to 'editMessageText' failed!", {
+    ok: false,
+    error_code: 400,
+    description: 'Bad Request: message is not modified',
+  }, 'editMessageText', {})
+}
+
+function boardCtx(overrides: Record<string, unknown> = {}) {
+  return {
+    chat: { id: 42, type: 'private' },
+    from: { id: 42 },
+    reply: vi.fn(async () => ({ message_id: 555 })),
+    answerCallbackQuery: vi.fn(async () => undefined),
+    editMessageText: vi.fn(async () => undefined),
+    api: {
+      editMessageText: vi.fn(async () => undefined),
+      deleteMessage: vi.fn(async () => undefined),
+    },
+    ...overrides,
+  }
+}
+
+describe('Telegram watcher board', () => {
+  async function startBoard() {
+    startMock.mockImplementation(async ({ onStart }: { onStart?: () => void }) => { onStart?.() })
+    const adapter = new TelegramConnectorAdapter()
+    await adapter.start(
+      { enabled: true, settings: { botToken: 'test-token', ownerUserId: '42', chatId: '42' } },
+      context(),
+    )
+    await vi.waitFor(() => expect(handlers.has('watchers')).toBe(true))
+    return adapter
+  }
+
+  it('opens one message on /watchers and re-adopts it rather than posting a second', async () => {
+    const adapter = await startBoard()
+    try {
+      const first = boardCtx()
+      await handlers.get('watchers')!(first)
+      expect(first.reply).toHaveBeenCalledTimes(1)
+      expect(first.api.editMessageText).not.toHaveBeenCalled()
+
+      // Second run edits the SAME message. A second send would litter the chat
+      // with a stale duplicate board.
+      const second = boardCtx()
+      await handlers.get('watchers')!(second)
+      expect(second.reply).not.toHaveBeenCalled()
+      expect(second.api.editMessageText).toHaveBeenCalledWith(
+        42,
+        555,
+        expect.any(String),
+        expect.objectContaining({ parse_mode: 'HTML' }),
+      )
+    } finally { await adapter.stop() }
+  })
+
+  // The regression this file exists to pin. Before the fix, an unchanged board
+  // made Telegram answer 400 and the error escaped, so `/watchers` looked dead
+  // whenever the live 5s tick had already drawn the current state.
+  it('treats "message is not modified" as success instead of failing the command', async () => {
+    const adapter = await startBoard()
+    try {
+      await handlers.get('watchers')!(boardCtx())
+      const reopening = boardCtx()
+      reopening.api.editMessageText.mockRejectedValueOnce(notModifiedError())
+      await expect(handlers.get('watchers')!(reopening)).resolves.toBeUndefined()
+      // And it must NOT recover by posting a duplicate.
+      expect(reopening.reply).not.toHaveBeenCalled()
+    } finally { await adapter.stop() }
+  })
+
+  it('posts a fresh board when the existing message was deleted out-of-band', async () => {
+    const adapter = await startBoard()
+    try {
+      await handlers.get('watchers')!(boardCtx())
+      const gone = boardCtx()
+      gone.api.editMessageText.mockRejectedValueOnce(new GrammyError(
+        "Call to 'editMessageText' failed!",
+        { ok: false, error_code: 400, description: 'Bad Request: message to edit not found' },
+        'editMessageText',
+        {},
+      ))
+      await handlers.get('watchers')!(gone)
+      // Doing nothing here would look like a broken command, so a fresh board
+      // is the honest recovery.
+      expect(gone.reply).toHaveBeenCalledTimes(1)
+    } finally { await adapter.stop() }
+  })
+
+  it('surfaces an unrelated edit failure rather than silently swallowing it', async () => {
+    const adapter = await startBoard()
+    try {
+      await handlers.get('watchers')!(boardCtx())
+      const broken = boardCtx()
+      broken.api.editMessageText.mockRejectedValueOnce(new Error('network down'))
+      await handlers.get('watchers')!(broken)
+      // The command handler owns the error presentation: a real failure must be
+      // TOLD to the operator, and must not be papered over by quietly posting a
+      // duplicate board that would then compete with the live one.
+      expect(broken.reply).toHaveBeenCalledWith(
+        expect.stringContaining('Could not open the watcher board'),
+      )
+    } finally { await adapter.stop() }
+  })
+
+  it('closes the board and deletes the message on Close', async () => {
+    const adapter = await startBoard()
+    try {
+      await handlers.get('watchers')!(boardCtx())
+      const closing = boardCtx({
+        callbackQuery: { data: 'wb:x', message: { message_id: 555 } },
+      })
+      await handlers.get('callback_query:data')!(closing)
+      expect(closing.api.deleteMessage).toHaveBeenCalledWith(42, 555)
+      // A closed board is dormant: /watchers must post again, not edit a
+      // message that no longer exists.
+      const reopened = boardCtx()
+      await handlers.get('watchers')!(reopened)
+      expect(reopened.reply).toHaveBeenCalledTimes(1)
+      expect(reopened.api.editMessageText).not.toHaveBeenCalled()
+    } finally { await adapter.stop() }
+  })
+
+  it('keeps board buttons owner-only', async () => {
+    const adapter = await startBoard()
+    try {
+      await handlers.get('watchers')!(boardCtx())
+      const stranger = boardCtx({
+        from: { id: 99 },
+        callbackQuery: { data: 'wb:x', message: { message_id: 555 } },
+      })
+      await handlers.get('callback_query:data')!(stranger)
+      expect(stranger.api.deleteMessage).not.toHaveBeenCalled()
+      expect(stranger.answerCallbackQuery).toHaveBeenCalledWith(
+        expect.objectContaining({ text: expect.stringContaining('owner') }),
+      )
+    } finally { await adapter.stop() }
+  })
 })

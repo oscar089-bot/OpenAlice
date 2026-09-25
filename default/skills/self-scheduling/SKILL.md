@@ -221,6 +221,13 @@ binding and does not rewrite persistent Workspace configuration.
 The old parallel `execution` field is retired and rejected after migration;
 never write it into a new Issue.
 
+> **Never write `connectorDesk`.** It marks the ONE phone-desk Issue per
+> connector and is written only by Connector Settings. Hand-writing it onto an
+> ordinary Issue removes that Issue from the board (desk rows are hidden) and
+> makes the real phone-desk file invalid. A watcher that should notify you on
+> Telegram does not need it — the watcher wakes the Session, and the Session's
+> reply reaches you however that Session already talks to you.
+
 The markdown **What** below the closing `---` is the Issue's canonical work
 definition. It is useful for every Issue; when scheduled, this exact visible
 markdown becomes the headless prompt. Comments are separate structured markdown
@@ -288,6 +295,128 @@ otherwise do nothing and exit."
 > **Trades still need a human.** A scheduled run can research, prepare, and even
 > *stage* trades — but staged trades execute only when you approve them in the
 > Web UI (Trading-as-Git). A timer never moves money on its own.
+
+## Watch a market condition with `watch`
+
+A `watch` is a **deterministic market condition**, not a timer. Alice evaluates it
+every 5 seconds against live price. The moment the condition first becomes true,
+it wakes this Issue's owning Session with your What as the plan, sends a Discord
+alert, and lets you re-arm for the next phase.
+
+Use a watcher instead of a frequent `when` whenever the work is
+**"do something when the market does X"**:
+
+- entry/reclaim/breakout conditions ("alert when BTC closes 1h above 110k")
+- invalidation conditions ("tell me if SOL loses 92")
+- trade management ("wake me at 2R", "alert if unrealized P&L drops below -5%")
+
+A `when` schedule re-runs the agent on a clock whether or not anything changed.
+A `watch` runs an agent **only when the condition actually fires** — so a watcher
+that never triggers costs nothing but a price lookup.
+
+### Shape
+
+```markdown
+---
+title: BTC 1h reclaim watch
+assignee: "@resume-calm-amber-river-a1b2c3"
+watch:
+  pair: BTC-USDT
+  assetClass: crypto        # crypto | forex | equity | commodity | index
+  direction: LONG           # optional; sets the default rule side
+  timeframe: 1h             # 1m or larger — 30s candles are not reliable
+  rules:
+    - { type: candle_close, timeframe: 1h, side: above, level: 110000 }
+  invalidationRules:
+    - { type: price_breaks_level, side: below, level: 98000 }
+---
+
+Re-analyse the reclaim against my original thesis, then tell me what changed and
+what the next actionable level is. If the setup still holds, re-arm this Issue
+for the next phase; otherwise mark it done.
+```
+
+- `assignee: "@resumeId"` is what makes the wake return to **the same coworker**
+  who wrote the analysis. Without it a scheduled-style recruit runs instead.
+- The markdown **What** is the plan the woken Session receives. Write it as the
+  next-step instruction — it is shown together with what just happened.
+- A `watch` and a `when` may coexist on one Issue. They are independent: the
+  clock fires the schedule, the market fires the watch.
+- Add **`expiry: 2026-10-01T00:00:00Z`** to stop watching after a date.
+
+### Rule types
+
+Every rule is `{ type, ... }`. Level rules need a numeric `level`; zone rules
+need numeric `low` + `high`. **Use `side`, never `condition`.**
+
+| `type` | Needs | Fires when |
+|---|---|---|
+| `price_breaks_level` | `side`, `level` | price is at or beyond the level (live) |
+| `price_crosses_level` | `side`, `level` | price moves across the level since the last check |
+| `candle_close` | `side`, `level`, `timeframe` | a **confirmed** candle closes beyond the level |
+| `level_reclaim` | `level` | price is above the level (shorthand for `side: above`) |
+| `level_breakdown` | `level` | price is below the level (shorthand for `side: below`) |
+| `liquidity_sweep_touched` | `level` | price pokes beyond the level |
+| `price_enters_zone` | `low`, `high` | price is inside the zone |
+| `price_approaches_zone` | `low`, `high`, optional `threshold`/`thresholdPct` | price is within the threshold of the zone |
+
+`side` defaults from `direction` when omitted (`LONG` → `above`, `SHORT` → `below`).
+
+**`candle_close` only fires on confirmed candles**, and a candle that closed at or
+before the watcher was armed is ignored — so re-arming never replays history.
+
+### Trade management (`managementRules`)
+
+To watch an **open** position, add a `position` block and `managementRules`. The
+entry, stop, and side are frozen into the watcher at creation — nothing queries
+the broker, so this works even when UTA is offline.
+
+```yaml
+watch:
+  pair: ETH-USDT
+  timeframe: 15m
+  rules: []
+  position: { side: LONG, entry: 3200, stop: 3050, targets: [3600] }
+  managementRules:
+    - { type: r_multiple_reached, multiple: 2 }
+    - { type: unrealized_pnl_pct, op: below, pct: -4 }
+```
+
+`r_multiple_reached` measures reward against `entry - stop` (or `stop - entry`
+for a short). `unrealized_pnl_pct` compares price to entry; `op` picks the
+direction of the comparison.
+
+### Anti-spam
+
+Each rule fires **once**. After it fires the watcher stays armed but that exact
+condition will not alert again until you re-arm, and a 15-minute cooldown
+guards the remaining rules. Invalidation rules are **terminal**: the first one to
+hit ends the watcher and reports `INVALIDATED`.
+
+### Re-arming (this is the important part)
+
+A watcher does **not** die when it fires — it is waiting for you to decide the
+next phase. When you are woken:
+
+1. Re-analyse against the event you were given.
+2. Tell the user what changed (a normal reply; the Discord alert is separate).
+3. If the thesis still holds, **rewrite the `watch:` block** with the next
+   condition and update the What to describe the new phase. Because the block
+   changed, Alice re-arms with fresh state and the previous phase's firing
+   history is cleared.
+4. If the thesis is finished or void, set `status: done` and delete the
+   `watch:` block.
+
+Keep the phase in the Issue so you do not lose the thread. Mention the current
+step in What — for example *"phase 2: reclaim confirmed, now watch for the
+retest of 108k"* — so the next wake has its own context.
+
+> **Never place orders from a watcher wake.** Re-analyse, report, and re-arm, or
+> stage a trade for human approval. A market condition is not approval.
+
+> **The watcher is deterministic.** It does not read your prose. If the condition
+> you care about is not expressible in the rules table, put the plain-English
+> condition in What and add a `when` schedule instead, accepting the extra runs.
 
 ## Notes
 

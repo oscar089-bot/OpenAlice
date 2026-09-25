@@ -75,7 +75,15 @@ export function useIssues(): UseIssues & { updateIssue: (wsId: string, id: strin
     setData((current) => {
       if (!current) return current
       const updated = { ...current, workspaces: current.workspaces.map((workspace) => workspace.wsId !== wsId ? workspace : {
-        ...workspace, issues: workspace.issues.map((issue) => issue.id === id ? { ...issue, ...next.issue } : issue),
+        ...workspace,
+        issues: workspace.issues.map((issue) => {
+          if (issue.id !== id) return issue
+          // The PATCH response is a DETAIL shape; merge only the list's own
+          // fields so a detail-only key (e.g. `watch` carrying full state)
+          // cannot overwrite the list's narrower projection.
+          const { watch: _detailWatch, ...listPatch } = next.issue
+          return { ...issue, ...listPatch, ...(issue.watch ? { watch: issue.watch } : {}) }
+        }),
       }) }
       cached = updated
       return updated

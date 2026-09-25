@@ -41,6 +41,7 @@ import { mountMarketDataCompat } from '../server/market-data-compat.js'
 import { buildSDKCredentials } from '../domain/market-data/credential-map.js'
 import { resolveUTAUrl } from '../services/uta-supervisor/url.js'
 import { createWorkspaceService, type WorkspaceService } from '../workspaces/service.js'
+import type { BarService } from '../domain/market-data/bars/types.js'
 
 /** Cross-plugin hand-off for WorkspaceService. WebPlugin creates it
  *  inside `start()`; McpPlugin needs it earlier for the `/mcp/:wsId`
@@ -81,6 +82,11 @@ export interface WebConfig {
   cliSocketPath?: string
   /** Internal packaged-acceptance seam; normal runtime leaves this undefined. */
   scheduleScannerIntervalMs?: number
+  /** Federated bar access for deterministic market watchers. When absent the
+   *  watch loop does not start, so `watch:` blocks stay inert. */
+  barService?: BarService
+  /** Internal packaged-acceptance seam for the watch loop cadence. */
+  watchLoopIntervalMs?: number
 }
 
 export class WebPlugin implements Plugin {
@@ -285,6 +291,10 @@ export class WebPlugin implements Plugin {
       mcpBaseUrl: this.config.mcpBaseUrl,
       ...(this.config.scheduleScannerIntervalMs !== undefined
         ? { scheduleScannerIntervalMs: this.config.scheduleScannerIntervalMs }
+        : {}),
+      ...(this.config.barService ? { barService: this.config.barService } : {}),
+      ...(this.config.watchLoopIntervalMs !== undefined
+        ? { watchLoopIntervalMs: this.config.watchLoopIntervalMs }
         : {}),
       inboxStore: ctx.inboxStore,
     })

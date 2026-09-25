@@ -9,6 +9,7 @@ import {
   type ConnectorUtaFailure,
   type ConnectorUtaPresentation,
   type ConnectorUtaRequest,
+  type ConnectorWatchRequest,
 } from '@traderalice/connector-protocol'
 import type { IInboxStore } from '../../core/inbox-store.js'
 import { readConnectorServiceEnabled } from '../../core/connector-config.js'
@@ -16,6 +17,7 @@ import type { TradingModePolicy } from '../trading-mode.js'
 import type { UTAManagerSDK } from '../uta-client/index.js'
 import { projectInboxDoc, resolveConnectorUrl } from './index.js'
 import { processConnectorUtaRequests } from './uta-review.js'
+import { processConnectorWatchRequests } from './watch-delete.js'
 
 interface WorkspaceServiceLike {
   registry: { get(id: string): { dir: string } | undefined }
@@ -36,6 +38,10 @@ export interface ConnectorActionBridgeDeps {
   claimUtaActions?: () => Promise<{ claimId: string; items: ConnectorUtaRequest[] }>
   ackUtaActions?: (claimId: string, itemIds: string[]) => Promise<void>
   releaseUtaActions?: (claimId: string, itemIds: string[]) => Promise<void>
+  /** Owner-initiated watcher actions (delete) drained from the connector. */
+  claimWatchActions?: () => Promise<{ claimId: string; items: ConnectorWatchRequest[] }>
+  ackWatchActions?: (claimId: string, itemIds: string[]) => Promise<void>
+  releaseWatchActions?: (claimId: string, itemIds: string[]) => Promise<void>
   presentUta?: (presentation: ConnectorUtaPresentation) => Promise<void>
   failUta?: (failure: ConnectorUtaFailure) => Promise<void>
   utaManager?: UTAManagerSDK
@@ -79,6 +85,9 @@ export function startConnectorActionBridge(
       claimUtaActions: () => client.claimUtaActions(AbortSignal.timeout(5_000)),
       ackUtaActions: (claimId, itemIds) => client.ackUtaActions(claimId, itemIds, AbortSignal.timeout(5_000)),
       releaseUtaActions: (claimId, itemIds) => client.releaseUtaActions(claimId, itemIds, AbortSignal.timeout(5_000)),
+    claimWatchActions: () => client.claimWatchActions(AbortSignal.timeout(5_000)),
+    ackWatchActions: (claimId, itemIds) => client.ackWatchActions(claimId, itemIds, AbortSignal.timeout(5_000)),
+    releaseWatchActions: (claimId, itemIds) => client.releaseWatchActions(claimId, itemIds, AbortSignal.timeout(5_000)),
       presentUta: async (presentation) => {
         await client.presentUta(presentation, AbortSignal.timeout(15_000))
       },
@@ -127,6 +136,19 @@ export function attachConnectorActionBridge(
           warn: deps.warnUta ?? deps.warn,
           utaManager: deps.utaManager,
           tradingModePolicy: deps.tradingModePolicy,
+          now: deps.now,
+        })
+      }
+      // Owner-initiated watcher deletion. Independent of the UTA block: a board
+      // button must still work on an install with no broker configured.
+      if (deps.claimWatchActions && deps.resolveWorkspace) {
+        await processConnectorWatchRequests({
+          isEnabled: deps.isEnabled,
+          claimWatchActions: deps.claimWatchActions,
+          ackWatchActions: deps.ackWatchActions,
+          releaseWatchActions: deps.releaseWatchActions,
+          resolveWorkspace: deps.resolveWorkspace,
+          warn: deps.warn,
           now: deps.now,
         })
       }

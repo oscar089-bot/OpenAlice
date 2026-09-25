@@ -36,6 +36,7 @@ COPY packages/uta-broker-leverup/package.json packages/uta-broker-leverup/
 COPY packages/uta-broker-longbridge/package.json packages/uta-broker-longbridge/
 COPY services/uta/package.json services/uta/
 COPY services/connector/package.json services/connector/
+COPY apps/miniapp/package.json apps/miniapp/
 COPY ui/package.json ui/
 
 RUN pnpm install --frozen-lockfile
@@ -110,6 +111,10 @@ COPY --from=build /src/dist                       ./dist
 COPY --from=build /src/services/uta/dist          ./services/uta/dist
 COPY --from=build /src/services/connector/dist    ./services/connector/dist
 COPY --from=build /src/ui/dist                    ./ui/dist
+# The Telegram Mini App bundle. Served by the connector from
+# APP_RESOURCES_HOME/apps/miniapp/dist, so it must sit at the same relative
+# path here as it does in a source checkout.
+COPY --from=build /src/apps/miniapp/dist          ./apps/miniapp/dist
 COPY --from=build /src/default                    ./default
 COPY --from=build /src/src/workspaces/templates   ./src/workspaces/templates
 # Workspace CLI launchers and their sibling payload are runtime resources just

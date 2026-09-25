@@ -62,6 +62,13 @@ export interface InboxInput {
    *  run header (never supplied by the agent). Optional + additive: old JSONL
    *  entries parse with `origin === undefined`, so NO migration is needed. */
   origin?: InboxOrigin
+  /** Optional Connector adapter allow-list. Absent means the historical
+   *  fan-out to every push-enabled adapter. Present routes the notification to
+   *  those adapter ids only — used so a machine alert (for example a fired
+   *  market watcher) reaches the owner's desk transports without also fanning
+   *  out to every other configured connector.
+   *  Additive: old JSONL entries parse with `deliverTo === undefined`. */
+  deliverTo?: string[]
 }
 
 export interface InboxEntry extends InboxInput {

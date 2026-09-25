@@ -32,7 +32,13 @@ it('uses one immutable destination and task identity from acceptance through fin
   await tasks.complete(run.taskId, { status: 'done' }); await delivery.finish(run, 'done')
   expect(sendOwnerMessage.mock.calls.map(call => call[0])).toEqual([
     expect.objectContaining({ phase: 'accepted', conversationId: run.taskId, activityLeaseMs: 60000 }),
-    expect.objectContaining({ phase: 'progress', text: 'checking', conversationId: run.taskId }),
+    // Progress carries structured activity and no prose: the transport renders
+    // (and animates) its own ephemeral slot from this.
+    expect.objectContaining({
+      phase: 'progress',
+      conversationId: run.taskId,
+      activity: expect.objectContaining({ toolCalls: 1, currentTool: 'read', recentTools: [{ name: 'read', status: 'running' }] }),
+    }),
     expect.objectContaining({ phase: 'final', text: 'done', conversationId: run.taskId, workspaceId: 'execution', source: 'automation' }),
   ])
   await delivery.offer(run, snapshot); await delivery.finish(run, 'duplicate'); await delivery.reconcile()

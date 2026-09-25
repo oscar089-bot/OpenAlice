@@ -782,10 +782,6 @@ packages:
     resolution: {integrity: sha512-+kmGVjcT9RGYzoDwdwEqEvGgKe3BYq+O1iGzjFubaNgZHwYHP6lsF2Yghf4kEuv9BV7tYDZ913aBW9am6YKong==}
     engines: {node: '>=6.9.0'}
 
-  '@babel/helper-plugin-utils@7.28.6':
-    resolution: {integrity: sha512-S9gzZ/bz83GRysI7gAD4wPT/AI3uCnY+9xn+Mx/KPs2JwHJIz1W8PZkg2cqyt3RNOBM8ejcXhV6y8Og7ly/Dug==}
-    engines: {node: '>=6.9.0'}
-
   '@babel/helper-plugin-utils@7.29.7':
     resolution: {integrity: sha512-G7sHYigPY17oO5SYWnfD/0MTBwVR781S/JI643e/JhUYgVgWE/61SoW3NH9KWUKyKq5LVh3npif99Wkt6j86Jw==}
     engines: {node: '>=6.9.0'}
@@ -5808,8 +5804,6 @@ snapshots:
     dependencies:
       '@babel/types': 7.29.7
 
-  '@babel/helper-plugin-utils@7.28.6': {}
-
   '@babel/helper-plugin-utils@7.29.7': {}
 
   '@babel/helper-replace-supers@7.29.7(@babel/core@7.29.7)':
@@ -5845,7 +5839,7 @@ snapshots:
 
   '@babel/parser@7.29.0':
     dependencies:
-      '@babel/types': 7.29.0
+      '@babel/types': 7.29.7
 
   '@babel/parser@7.29.7':
     dependencies:
@@ -5872,12 +5866,12 @@ snapshots:
   '@babel/plugin-transform-react-jsx-self@7.27.1(@babel/core@7.29.7)':
     dependencies:
       '@babel/core': 7.29.7
-      '@babel/helper-plugin-utils': 7.28.6
+      '@babel/helper-plugin-utils': 7.29.7
 
   '@babel/plugin-transform-react-jsx-source@7.27.1(@babel/core@7.29.7)':
     dependencies:
       '@babel/core': 7.29.7
-      '@babel/helper-plugin-utils': 7.28.6
+      '@babel/helper-plugin-utils': 7.29.7
 
   '@babel/plugin-transform-typescript@7.29.7(@babel/core@7.29.7)':
     dependencies:
@@ -6995,24 +6989,24 @@ snapshots:
 
   '@types/babel__core@7.20.5':
     dependencies:
-      '@babel/parser': 7.29.0
-      '@babel/types': 7.29.0
+      '@babel/parser': 7.29.7
+      '@babel/types': 7.29.7
       '@types/babel__generator': 7.27.0
       '@types/babel__template': 7.4.4
       '@types/babel__traverse': 7.28.0
 
   '@types/babel__generator@7.27.0':
     dependencies:
-      '@babel/types': 7.29.0
+      '@babel/types': 7.29.7
 
   '@types/babel__template@7.4.4':
     dependencies:
       '@babel/parser': 7.29.7
-      '@babel/types': 7.29.0
+      '@babel/types': 7.29.7
 
   '@types/babel__traverse@7.28.0':
     dependencies:
-      '@babel/types': 7.29.0
+      '@babel/types': 7.29.7
 
   '@types/cacheable-request@6.0.3':
     dependencies:

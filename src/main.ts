@@ -383,6 +383,10 @@ async function main() {
         ...(process.env['OPENALICE_ELECTRON_SMOKE_WORKSPACE_ACCEPTANCE'] === '1'
           ? { scheduleScannerIntervalMs: 100 }
           : {}),
+        // Deterministic market watchers. Absent in lite mode only when the bar
+        // layer is unavailable; otherwise `watch:` blocks evaluate on the
+        // WatchLoop default cadence (currently 5s), not a fixed override here.
+        barService,
       },
       workspaceServiceRef,
     ))

@@ -5,12 +5,12 @@ import { z } from 'zod'
 import { dataPath } from '@/core/paths.js'
 import { isSealedEnvelope, seal, unseal } from '@/core/sealing.js'
 
-export type ConnectorWorkKind = 'inbound' | 'artifact' | 'uta'
+export type ConnectorWorkKind = 'inbound' | 'artifact' | 'uta' | 'watch'
 
 const claimSchema = z.object({ id: z.string().min(1), expiresAt: z.number().int().nonnegative() })
 const entrySchema = z.object({
   id: z.string().min(1),
-  kind: z.enum(['inbound', 'artifact', 'uta']),
+  kind: z.enum(['inbound', 'artifact', 'uta', 'watch']),
   enqueuedAt: z.number().int().nonnegative(),
   payload: z.unknown(),
   claim: claimSchema.optional(),
@@ -41,6 +41,7 @@ const DEFAULT_LIMITS: Record<ConnectorWorkKind, number> = {
   inbound: 100,
   artifact: 20,
   uta: 20,
+  watch: 20,
 }
 
 /** Private sealed queue for Connector -> Alice work. Mutations are serialized

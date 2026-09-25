@@ -118,6 +118,26 @@ describe('Inbox push preference', () => {
   })
 })
 
+describe('Inbox notification routing', () => {
+  it('accepts a bounded adapter allow-list', () => {
+    expect(inboxNotificationSchema.parse({
+      ...baseNotification,
+      deliverTo: ['discord'],
+    }).deliverTo).toEqual(['discord'])
+  })
+
+  it('omits the allow-list so the historical fan-out is preserved', () => {
+    expect(inboxNotificationSchema.parse({ ...baseNotification }).deliverTo).toBeUndefined()
+  })
+
+  it('rejects an empty-string adapter id', () => {
+    expect(() => inboxNotificationSchema.parse({
+      ...baseNotification,
+      deliverTo: [''],
+    })).toThrow()
+  })
+})
+
 describe('Inbox notification attachments', () => {
   it('accepts a bounded Markdown file payload', () => {
     const content = Buffer.from('# Report\n')

@@ -17,6 +17,7 @@ parts together:
 ├── workspaces/           Workspace repositories, Sessions, and task state
 ├── state/                Guardian and runtime ownership locks
 ├── runtime/              optional Broker Packs
+├── tools/                Skill-provisioned interpreter environments
 ├── provider-keys.json    AI provider credentials, unless globally overridden
 └── sealing.key           machine-bound encryption key
 ```
@@ -25,6 +26,14 @@ Two AliceProjects may run concurrently when they use different complete
 homes and unpinned ports. Two writers must never share one home. Default ports
 probe upward independently, while explicitly pinned ports still fail if they
 collide.
+
+`tools/` holds disposable, rebuildable interpreter environments a Skill creates
+for itself — for example `tools/smc-venv/` for the `smart-money-concepts`
+Skill, which needs `pandas` and the MIT `smartmoneyconcepts` package. These are
+derived artifacts: deleting one costs only a rebuild. They must never live
+inside a Workspace repository or a Skill tree, because both are copied per desk
+and a Skill tree is content-fingerprinted for its injection revision. A pinned
+repo-root `OPENALICE_HOME` therefore ignores `/tools/*-venv/`.
 
 Workspace launcher state includes the private
 `workspaces/state/agent-conversations.jsonl` prompt/reply event stream and

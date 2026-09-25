@@ -151,6 +151,8 @@ export interface IssueListItem {
   nextDueAtMs?: number | null
   /** Live scheduler/worker health; present iff the Issue has a schedule. */
   automationHealth?: IssueAutomationHealth
+  /** Authored watcher summary, present iff the Issue carries a `watch:`. */
+  watch?: IssueWatchSummary
   /** Adapter id when this row is that connector's phone-desk Issue. */
   connectorDesk?: string
   telegramConnector?: true
@@ -245,6 +247,129 @@ export interface WikilinkResolution {
 // feed). Mirrors the server's `IssueDetail` / `IssueDetailIssue` in
 // `src/workspaces/issues/board.ts`. Demo handlers MUST import these types.
 
+/** Deterministic market watcher — mirrors `src/workspaces/watch/types.ts`.
+ *  Kept structurally identical so a grammar change is a compile error here. */
+export type WatchAssetClass = 'crypto' | 'forex' | 'equity' | 'commodity' | 'index'
+export type WatchSide = 'above' | 'below'
+export type WatchRuleType =
+  | 'price_breaks_level'
+  | 'price_crosses_level'
+  | 'candle_close'
+  | 'level_reclaim'
+  | 'level_breakdown'
+  | 'liquidity_sweep_touched'
+  | 'price_enters_zone'
+  | 'price_approaches_zone'
+
+export interface WatchRule {
+  type: WatchRuleType
+  id?: string
+  side?: WatchSide
+  level?: number
+  low?: number
+  high?: number
+  timeframe?: string
+  threshold?: number
+  thresholdPct?: number
+}
+
+export type WatchManagementRuleType = 'r_multiple_reached' | 'unrealized_pnl_pct'
+
+export interface WatchManagementRule {
+  type: WatchManagementRuleType
+  id?: string
+  multiple?: number
+  pct?: number
+  op?: WatchSide
+}
+
+export interface WatchPosition {
+  side: 'LONG' | 'SHORT'
+  entry: number
+  stop?: number
+  targets?: number[]
+  size?: number
+}
+
+export interface WatchSpec {
+  pair: string
+  assetClass: WatchAssetClass
+  direction: 'LONG' | 'SHORT' | ''
+  timeframe: string
+  rules: WatchRule[]
+  invalidationRules: WatchRule[]
+  managementRules: WatchManagementRule[]
+  position?: WatchPosition
+  expiry?: string
+}
+
+export interface WatchCandle {
+  timestamp: string
+  open: number
+  high: number
+  low: number
+  close: number
+  volume?: number | null
+  timeframe?: string
+  confirmed?: boolean
+}
+
+export interface WatchState {
+  armedAt: string | null
+  specFingerprint: string | null
+  lastChecked: string | null
+  lastPrice: number | null
+  lastMarketTimestamp: string | null
+  lastConfirmedCandle: WatchCandle | null
+  previousConfirmedCandle: WatchCandle | null
+  lastEvent: string | null
+  terminal: boolean
+  alertedConditions: Record<string, string>
+  firedConditions: Record<string, string>
+  cooldownUntil: string | null
+  /** Deadline before which a failing feed will not be re-fetched. Persisted so
+   *  a restart cannot reset the backoff into a retry storm. */
+  backoffUntil: string | null
+  pollCount: number
+  errorCount: number
+  lastError: string | null
+}
+
+export type WatchEventType =
+  | 'TRIGGER_HIT'
+  | 'TRIGGER_CLOSE'
+  | 'MANAGEMENT_ALERT'
+  | 'INVALIDATED'
+  | 'EXPIRED'
+  | 'ERROR'
+
+export interface WatchEvent {
+  watcherId: string
+  eventType: WatchEventType
+  conditionKey: string
+  message: string
+  price: number | null
+  at: string
+  data?: Record<string, unknown>
+}
+
+/** Full watcher status on the Issue detail. `state` is absent before the first
+ *  evaluation; `events` is the bounded history, oldest first. */
+export interface IssueWatchStatus {
+  spec: WatchSpec
+  state?: WatchState | null
+  events?: WatchEvent[]
+}
+
+/** Cheap authored-spec badge on the board row — no sidecar read. */
+export interface IssueWatchSummary {
+  pair: string
+  assetClass: string
+  timeframe: string
+  ruleCount: number
+  terminal?: boolean
+}
+
 /** One issue's full detail fields plus canonical markdown What. */
 export interface IssueDetailIssue {
   id: string
@@ -277,6 +402,9 @@ export interface IssueDetailIssue {
   nextDueAtMs?: number | null
   /** Live scheduler/worker health; present iff the Issue has a schedule. */
   automationHealth?: IssueAutomationHealth
+  /** Deterministic market watcher status, present iff the Issue carries a
+   *  `watch:`. Detail carries the persisted state and event history. */
+  watch?: IssueWatchStatus
   connectorDesk?: string
   telegramConnector?: true
 }
@@ -334,6 +462,8 @@ export interface IssuePatch {
   what?: string
   commentPrompt?: string | null
   catchUp?: boolean
+  /** Full watcher spec, or null to remove it and its persisted state. */
+  watch?: WatchSpec | null
 }
 
 export const issuesApi = {

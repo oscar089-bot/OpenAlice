@@ -230,6 +230,50 @@ export class ScheduleScanner {
       false, undefined, undefined, true, input.commentId, undefined, input.source)
   }
 
+  /**
+   * Dispatch one watch-triggered run.
+   *
+   * Shares the scheduler's dispatch/claim exclusion, so a calendar fire and a
+   * watch fire can never double-dispatch the same Issue. Deliberately does NOT
+   * advance the schedule marker: a watch fire is a market event, not a calendar
+   * occurrence, and writing the marker would silently skip the Issue's next
+   * scheduled slot.
+   *
+   * Ownership is re-read from disk while the exclusion is held, so a `@new-
+   * then-resume` claim works exactly as it does for a scheduled fire and the
+   * wake prompt always targets the Issue's current owner.
+   */
+  async runWatchFire(input: {
+    workspaceId: string
+    issueId: string
+    /** The wake prompt built from the Issue What plus the fired event. */
+    prompt: string
+    conditionKey: string
+    eventType: string
+  }): Promise<{ taskId: string; resumeId: string }> {
+    const ws = this.deps.registry.get(input.workspaceId)
+    if (!ws) throw new Error('Workspace not found.')
+    const read = await readWorkspaceIssues(ws.dir)
+    const live = read.ok ? read.issues.find((issue) => issue.id === input.issueId) : undefined
+    if (!live) throw new Error('Issue not found.')
+    return this.dispatchIssue(
+      ws,
+      input.issueId,
+      input.prompt,
+      live.agent,
+      issueRunOverrides(live),
+      issueAssigneeResumeId(live.assignee) ?? undefined,
+      issueAssigneeClaimsFirstSession(live.assignee),
+      issueRunTimeoutMs(live),
+      live.connectorDesk,
+      true,
+      undefined,
+      undefined,
+      undefined,
+      { conditionKey: input.conditionKey, eventType: input.eventType },
+    )
+  }
+
   private arm(): void {
     if (this.stopped) return
     this.timer = setTimeout(() => void this.tickAndRearm(), this.intervalMs)
@@ -425,6 +469,8 @@ export class ScheduleScanner {
     commentId?: string,
     retryOfTaskId?: string,
     commentSource?: IssueCommentRequest['source'],
+    /** Present when a deterministic market watcher caused this run. */
+    watchMetadata?: { conditionKey: string; eventType: string },
   ): Promise<{ taskId: string; resumeId: string }> {
     const dispatchKey = `${issueWorkspace.id}:${issueId}`
     if (this.dispatchingIssues.has(dispatchKey)) {
@@ -477,14 +523,22 @@ export class ScheduleScanner {
         ...(retryOfTaskId ? { retryOfTaskId } : {}),
         workspaceId: issueWorkspace.id,
         issueId,
-        ...(connectorDesk
+        ...(watchMetadata
           ? {
               metadata: {
-                kind: 'connector-cron-issue' as const,
-                connectorId: connectorDesk,
+                kind: 'watch' as const,
+                conditionKey: watchMetadata.conditionKey,
+                eventType: watchMetadata.eventType,
               },
             }
-          : {}),
+          : connectorDesk
+            ? {
+                metadata: {
+                  kind: 'connector-cron-issue' as const,
+                  connectorId: connectorDesk,
+                },
+              }
+            : {}),
       }
       // Fresh recruits only: exact @resumeId continues an existing Session.
       const createdBy: SessionCreatedBy | undefined = resumeId
@@ -494,7 +548,13 @@ export class ScheduleScanner {
             workspaceId: issueWorkspace.id,
             issueId,
             policy: claimFreshSession ? 'new-then-resume' : 'new-each-run',
-            fire: commentId ? 'comment' : manual ? (retryOfTaskId ? 'retry' : 'manual') : 'schedule',
+            fire: watchMetadata
+              ? 'watch'
+              : commentId
+                ? 'comment'
+                : manual
+                  ? (retryOfTaskId ? 'retry' : 'manual')
+                  : 'schedule',
           }
       const inquiry: HeadlessTaskInquiry | undefined = commentId ? {
         subject: { kind: 'issue', workspaceId: issueWorkspace.id, issueId, relation: 'owner', commentId },

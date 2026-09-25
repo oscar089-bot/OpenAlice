@@ -1,5 +1,18 @@
 # Third-Party Notices
 
+## smartmoneyconcepts
+
+- Package: `smartmoneyconcepts` (PyPI)
+- Source: https://github.com/joshyattridge/smart-money-concepts
+- License: MIT
+- Copyright: Joshua Attridge and contributors
+- Usage: the `smart-money-concepts` Workspace Skill documents the package and
+  ships a bridge script (`default/skills/smart-money-concepts/scripts/smc.py`)
+  that invokes it. The package itself is installed from PyPI at use time and is
+  NOT vendored into this repository; only the bridge script is OpenAlice-authored.
+- Note: upstream describes the indicators as educational and not a sole basis
+  for trading decisions.
+
 ## Oh My Pi TUI interaction primitives
 
 `packages/cli/src/supervisor-tui-pointer.ts` and the surrounding Supervisor

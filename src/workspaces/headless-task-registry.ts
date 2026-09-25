@@ -44,10 +44,19 @@ export interface HeadlessTaskOutputSummary {
 /** The business object that caused an execution. This is intentionally
  * independent from `wsId`: an exact signed Session may execute in Workspace B
  * while answering a scheduled Issue whose source of truth remains Workspace A. */
-export type HeadlessTaskTriggerMetadata = {
-  readonly kind: 'connector-cron-issue'
-  readonly connectorId: string
-}
+export type HeadlessTaskTriggerMetadata =
+  | {
+      readonly kind: 'connector-cron-issue'
+      readonly connectorId: string
+    }
+  | {
+      /** A deterministic market watcher on this Issue fired. The run remains an
+       *  Issue run (`trigger.kind === 'issue'`); this profile only records which
+       *  market condition caused it, so provenance can show the cause. */
+      readonly kind: 'watch'
+      readonly conditionKey: string
+      readonly eventType: string
+    }
 
 export type HeadlessTaskTrigger = {
   /** Exact failed occurrence retried; independent of conversation parentTaskId. */

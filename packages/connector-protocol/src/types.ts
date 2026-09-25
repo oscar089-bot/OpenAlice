@@ -150,6 +150,9 @@ export const inboxNotificationSchema = z.object({
   title: z.string().min(1),
   body: z.string().default(''),
   attachments: z.array(connectorAttachmentSchema).max(MAX_CONNECTOR_ATTACHMENTS).optional(),
+  /** Adapter allow-list. Absent preserves the fan-out to every push-enabled
+   *  adapter; present restricts delivery to those ids. */
+  deliverTo: z.array(z.string().min(1)).max(8).optional(),
   href: z.string().optional(),
   provenance: z.object({
     resumeId: z.string().optional(),
@@ -193,12 +196,73 @@ export const OWNER_CHAT_TEXT_MAX = 32_768
 export const ownerChatPhaseSchema = z.enum(['accepted', 'progress', 'final', 'failed'])
 export type OwnerChatPhase = z.infer<typeof ownerChatPhaseSchema>
 
+/**
+ * One tool the turn has touched, with the outcome the runner reported.
+ *
+ * `name` is the raw vendor name (`Read`, `Bash`, `mcp__srv__tool`); rendering
+ * shortens it. Status is carried per-tool rather than only as an aggregate
+ * count, because "3 tools, 1 failed" does not say WHICH one failed.
+ */
+export const ownerChatToolStatusSchema = z.enum(['running', 'completed', 'failed'])
+export type OwnerChatToolStatus = z.infer<typeof ownerChatToolStatusSchema>
+
+export const ownerChatToolSchema = z.object({
+  name: z.string().min(1).max(120),
+  status: ownerChatToolStatusSchema,
+  /** Wall-clock duration in ms. Present once the tool finished. */
+  durationMs: z.number().int().min(0).optional(),
+  /**
+   * Short single-line reason for a failure.
+   *
+   * This is the ONE place tool output crosses the wire, and it is deliberate: a
+   * failure with no reason is not actionable, and "1 failed" alone cannot say
+   * which tool or why. Clipped to one line upstream so a path-heavy stack trace
+   * cannot arrive here, and only ever set for `failed`.
+   */
+  error: z.string().min(1).max(200).optional(),
+})
+export type OwnerChatTool = z.infer<typeof ownerChatToolSchema>
+
+/**
+ * Compact live activity for the transport's ephemeral slot.
+ *
+ * Deliberately STRUCTURED rather than pre-rendered markdown: Alice's progress
+ * publisher is debounced at 1s, so a transport that only re-displayed Alice's
+ * last string would freeze during a long tool call. A transport that owns the
+ * render can advance its own animation locally between updates, and a chat
+ * surface without layout primitives (Telegram) renders the same data its own
+ * way.
+ *
+ * No tool input/output: those are noisy and can carry paths. Only the tool NAME
+ * is projected, which is what makes an otherwise-silent turn legible.
+ */
+export const ownerChatActivitySchema = z.object({
+  /** Tool calls seen this turn, in flight or finished. */
+  toolCalls: z.number().int().min(0),
+  /** Subset of `toolCalls` that ended in failure. */
+  toolFailures: z.number().int().min(0),
+  /** Name of the tool running right now, when one is. */
+  currentTool: z.string().min(1).max(120).optional(),
+  /**
+   * Most recent tools, oldest first, capped by the projector.
+   *
+   * This exists because `currentTool` alone loses every call that finished
+   * between two progress publishes — which is most of them, since a Read or a
+   * Grep completes in well under the 1s debounce. A turn that ran six tools
+   * would otherwise render as a bare "Working" with no evidence of what ran.
+   */
+  recentTools: z.array(ownerChatToolSchema).max(12).optional(),
+})
+export type OwnerChatActivity = z.infer<typeof ownerChatActivitySchema>
+
 /** Lifecycle event for one owner-private Agent turn.
  * `accepted` starts transport-native activity without requiring model text.
  * `progress` is ephemeral; final without text silently ends activity. */
 export const ownerChatMessageSchema = z.object({
   /** Renewed by Alice while the execution lives; expiry only stops local activity. */
   activityLeaseMs: z.number().int().min(1000).max(120_000).optional(),
+  /** Live turn activity. `progress` only; ignored on terminal phases. */
+  activity: ownerChatActivitySchema.optional(),
   id: z.string().min(1),
   adapterId: z.string().min(1),
   conversationId: z.string().min(1),
@@ -207,14 +271,134 @@ export const ownerChatMessageSchema = z.object({
   source: z.enum(['conversation', 'automation']).optional(),
   text: z.string().min(1).max(OWNER_CHAT_TEXT_MAX).optional(),
 }).superRefine((message, ctx) => {
-  if (message.phase !== 'accepted' && message.phase !== 'final' && !message.text) {
+  if (message.phase !== 'accepted' && message.phase !== 'final' && !message.text && !message.activity) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: ['text'],
-      message: `${message.phase} owner-chat events require text`,
+      message: `${message.phase} owner-chat events require text or activity`,
+    })
+  }
+  if (message.activity && message.phase !== 'progress') {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['activity'],
+      message: 'activity is only meaningful on the progress phase',
     })
   }
 })
+
+// ==================== Persistent watcher board ====================
+
+/** Bounds one sync. A pathological workspace must not be able to make the chat
+ *  surface allocate an unbounded number of cards. */
+export const MAX_WATCHER_BOARD_ITEMS = 50
+
+const watcherBoardRuleSchema = z.object({
+  type: z.string().min(1),
+  id: z.string().min(1).max(64).optional(),
+  side: z.string().max(16).optional(),
+  level: z.number().finite().optional(),
+  low: z.number().finite().optional(),
+  high: z.number().finite().optional(),
+  timeframe: z.string().max(16).optional(),
+  threshold: z.number().finite().nonnegative().optional(),
+  thresholdPct: z.number().finite().nonnegative().optional(),
+  multiple: z.number().finite().optional(),
+  pct: z.number().finite().optional(),
+  op: z.string().max(16).optional(),
+})
+
+const watcherBoardCandleSchema = z.object({
+  timestamp: z.string().min(1),
+  open: z.number().finite().optional(),
+  high: z.number().finite().optional(),
+  low: z.number().finite().optional(),
+  close: z.number().finite(),
+  volume: z.number().finite().nullable().optional(),
+  timeframe: z.string().max(16).optional(),
+  confirmed: z.boolean().optional(),
+})
+
+const watcherBoardSpecSchema = z.object({
+  pair: z.string().min(1).max(64),
+  assetClass: z.string().max(32).optional(),
+  direction: z.string().max(16).optional(),
+  timeframe: z.string().max(16).optional(),
+  rules: z.array(watcherBoardRuleSchema).max(32).optional(),
+  invalidationRules: z.array(watcherBoardRuleSchema).max(32).optional(),
+  managementRules: z.array(watcherBoardRuleSchema).max(32).optional(),
+  position: z.object({
+    side: z.enum(['LONG', 'SHORT']),
+    entry: z.number().finite(),
+    stop: z.number().finite().optional(),
+    targets: z.array(z.number().finite()).max(10).optional(),
+    size: z.number().finite().optional(),
+  }).optional(),
+  expiry: z.string().min(1).optional(),
+  waitingTrigger: z.string().max(500).optional(),
+  invalidationConditions: z.array(z.string().max(500)).max(20).optional(),
+})
+
+const watcherBoardStateSchema = z.object({
+  armedAt: z.string().nullable().optional(),
+  lastChecked: z.string().nullable().optional(),
+  lastPrice: z.number().finite().nullable().optional(),
+  lastMarketTimestamp: z.string().nullable().optional(),
+  lastConfirmedCandle: watcherBoardCandleSchema.nullable().optional(),
+  previousConfirmedCandle: watcherBoardCandleSchema.nullable().optional(),
+  terminal: z.boolean().optional(),
+  pollCount: z.number().int().min(0).optional(),
+  errorCount: z.number().int().min(0).optional(),
+  lastError: z.string().nullable().optional(),
+  backoffUntil: z.string().nullable().optional(),
+  firedConditions: z.record(z.string(), z.string()).optional(),
+})
+
+const watcherBoardMetaSchema = z.object({
+  rating: z.union([z.string(), z.number()]).nullable().optional(),
+  grade: z.string().nullable().optional(),
+  setupPhase: z.string().nullable().optional(),
+  nextStep: z.string().max(500).nullable().optional(),
+  stopLoss: z.number().finite().nullable().optional(),
+  targets: z.union([z.array(z.number().finite()).max(10), z.string().max(200)]).nullable().optional(),
+})
+
+const watcherBoardEventSchema = z.object({
+  eventType: z.string().min(1),
+  message: z.string(),
+  at: z.string().optional(),
+  price: z.number().finite().nullable().optional(),
+})
+
+/** One watcher the connector should render as a persistent, self-updating card.
+ *  Alice renders it; the connector owns only the transport identity. */
+export const watcherBoardItemSchema = z.object({
+  watcherId: z.string().min(1).max(64),
+  workspaceId: z.string().min(1).max(128),
+  workspaceLabel: z.string().max(128).optional(),
+  title: z.string().min(1).max(200),
+  running: z.boolean(),
+  pollable: z.boolean(),
+  pollSeconds: z.number().min(1).max(3600),
+  spec: watcherBoardSpecSchema,
+  state: watcherBoardStateSchema,
+  meta: watcherBoardMetaSchema.optional(),
+  events: z.array(watcherBoardEventSchema).max(20).optional(),
+  nowIso: z.string().min(1),
+})
+export type WatcherBoardItem = z.infer<typeof watcherBoardItemSchema>
+
+/**
+ * One complete board state push. Idempotent: the connector reconciles its chat
+ * messages against `items` and deletes any card whose watcher is no longer
+ * listed. `refreshSeconds` tells the connector how fast to re-render locally
+ * for the pulse animation — it does NOT trigger a new Alice round-trip.
+ */
+export const watcherBoardSyncSchema = z.object({
+  refreshSeconds: z.number().min(1).max(120).default(5),
+  items: z.array(watcherBoardItemSchema).max(MAX_WATCHER_BOARD_ITEMS),
+})
+export type WatcherBoardSync = z.infer<typeof watcherBoardSyncSchema>
 export type OwnerChatMessage = z.infer<typeof ownerChatMessageSchema>
 
 export const inboundOwnerMessageSchema = z.object({
@@ -289,6 +473,36 @@ export function isConnectorActionExpired(createdAt: string, now = Date.now()): b
 /** Owner UTA review / push / reject. Not phone-desk inbound and not Inbox. */
 export const MAX_CONNECTOR_UTA_ACCOUNTS = 8
 export const MAX_CONNECTOR_UTA_OPERATIONS = 8
+
+/**
+ * Owner-initiated watcher management from a chat surface.
+ *
+ * The connector cannot mutate watch state itself \u2014 Alice owns it \u2014 so a card's
+ * Delete button enqueues this and Alice performs the removal. That keeps the
+ * watch store single-writer, which is what makes the board a VIEW rather than
+ * a second source of truth.
+ */
+export const MAX_CONNECTOR_WATCH_REQUESTS = 20
+
+export const connectorWatchActionSchema = z.enum(['delete'])
+export type ConnectorWatchAction = z.infer<typeof connectorWatchActionSchema>
+
+export const connectorWatchRequestSchema = z.object({
+  requestId: z.string().min(1).max(64),
+  connectorId: z.string().min(1).max(64),
+  createdAt: z.string().datetime(),
+  action: connectorWatchActionSchema,
+  /** The owning workspace. A watcher id is only unique within a workspace. */
+  workspaceId: z.string().min(1).max(128),
+  /** The Issue id, which is also the watcher id. */
+  watcherId: z.string().min(1).max(64),
+})
+export type ConnectorWatchRequest = z.infer<typeof connectorWatchRequestSchema>
+
+export const connectorWatchRequestListSchema = z.object({
+  requests: z.array(connectorWatchRequestSchema).max(MAX_CONNECTOR_WATCH_REQUESTS),
+})
+export type ConnectorWatchRequestList = z.infer<typeof connectorWatchRequestListSchema>
 
 export const connectorUtaActionSchema = z.enum(['review', 'push', 'reject'])
 export type ConnectorUtaAction = z.infer<typeof connectorUtaActionSchema>

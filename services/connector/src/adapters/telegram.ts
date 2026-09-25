@@ -1,6 +1,6 @@
 import { TelegramModelControls } from './telegram-model.js'
 import { createHash } from 'node:crypto'
-import { Bot, InlineKeyboard, InputFile, type Context } from 'grammy'
+import { Bot, GrammyError, InlineKeyboard, InputFile, type Context } from 'grammy'
 import { autoRetry } from '@grammyjs/auto-retry'
 import type {
   ConnectorAdapterConfig,
@@ -10,8 +10,11 @@ import type {
   ConnectorUtaPresentation,
   InboxNotification,
   OwnerChatMessage,
+  OwnerChatActivity,
+  WatcherBoardItem,
+  WatcherBoardSync,
 } from '@traderalice/connector-protocol'
-import { isInboxPushEnabled, TELEGRAM_CONNECTOR_DEFINITION } from '@traderalice/connector-protocol'
+import { isInboxPushEnabled, renderTurnActivity, TELEGRAM_CONNECTOR_DEFINITION } from '@traderalice/connector-protocol'
 import { createInboxStore, type IInboxStore } from '@/core/inbox-store.js'
 import type {
   ConnectorAdapter,
@@ -52,9 +55,35 @@ import {
   type TelegramUtaSession,
 } from './telegram-uta.js'
 import { sendTelegramRichText } from './telegram-rich-text.js'
+import {
+  clampBoardIndex,
+  formatTelegramWatcherBoard,
+  parseTelegramWatchControl,
+  toggleExpanded,
+  type TelegramWatchControl,
+  type TelegramWatcherBoardForm,
+} from './telegram-watchers.js'
+import {
+  loadTelegramBoardState,
+  saveTelegramBoardState,
+  type TelegramBoardState,
+} from './telegram-board-store.js'
 
 const TELEGRAM_DRAFT_HEARTBEAT_MS = 20_000
 const TELEGRAM_TYPING_HEARTBEAT_MS = 4_000
+/**
+ * Minimum gap between activity-only re-renders.
+ *
+ * The activity bar advances on this adapter's OWN frame rather than on Alice's
+ * reported progress, because Alice's publisher is debounced at 1s and a tool
+ * call routinely outlives it — a bar tied to reported progress would sit frozen
+ * and read as a hang. A CONTENT change (a new tool, a new status) bypasses this
+ * floor and renders immediately; only the between-change animation waits.
+ * Telegram allows roughly one edit per second per chat, so ~0.8s is the
+ * practical floor for a spinner that reads as continuous motion rather than a
+ * once-a-second twitch.
+ */
+const TELEGRAM_ACTIVITY_RENDER_MS = 800
 const TELEGRAM_RESUME_CHECK_INTERVAL_MS = 15_000
 const TELEGRAM_RESUME_GAP_MS = 45_000
 const MAX_FINISHED_DRAFTS = 128
@@ -62,11 +91,31 @@ const MAX_FINISHED_DRAFTS = 128
 interface TelegramDraftSession {
   draftId: number
   markdown?: string
+  /** Live turn activity; when set it owns the slot instead of `markdown`. */
+  activity?: OwnerChatActivity
+  /** Advances on every activity render so the bar visibly moves. */
+  frame: number
+  /** Fingerprint of the last rendered activity, to detect real changes. */
+  lastActivityKey?: string
   refreshedAt?: number
+  /** Last time a `typing` action was sent. Throttled separately from renders,
+   *  because the action outlives one animation frame and re-sending it every
+   *  tick would spend the per-chat rate budget the frames themselves need. */
+  lastTypingAt?: number
   typingFallback: boolean
   stopped: boolean
   pending: Promise<void>
   timer?: ReturnType<typeof setTimeout>
+}
+
+function createDraftSession(conversationId: string): TelegramDraftSession {
+  return {
+    draftId: telegramDraftId(conversationId),
+    frame: 0,
+    typingFallback: false,
+    stopped: false,
+    pending: Promise.resolve(),
+  }
 }
 
 export class TelegramConnectorAdapter implements ConnectorAdapter {
@@ -93,6 +142,23 @@ export class TelegramConnectorAdapter implements ConnectorAdapter {
   private token?: string
   private adapterContext?: ConnectorAdapterContext
   private readonly proxy: ConnectorProxyTransport
+  /**
+   * The on-demand watcher board.
+   *
+   * Unlike Discord this board is DORMANT until the operator runs /watchers, and
+   * it is a SINGLE message the pager edits in place. `messageId === null` means
+   * closed: no edits, no chatter, nothing in the chat at all.
+   */
+  private boardChatId: number | null = null
+  private boardMessageId: number | null = null
+  private boardIndex = 0
+  private boardExpanded = new Set<string>()
+  /** Last Alice push, re-rendered on every board refresh. */
+  private boardItems: WatcherBoardItem[] = []
+  private boardRefreshSeconds = 5
+  /** Advances per render so the pulse bar visibly moves between pushes. */
+  private boardFrame = 0
+  private boardStatePath?: string
 
   constructor(options: {
     attemptTimeoutMs?: number
@@ -102,6 +168,7 @@ export class TelegramConnectorAdapter implements ConnectorAdapter {
     startupTimeoutMs?: number
     inboxStore?: IInboxStore
     proxy?: ConnectorProxyTransport
+    boardStatePath?: string
   } = {}) {
     this.attemptTimeoutMs = options.attemptTimeoutMs ?? options.startupTimeoutMs ?? DEFAULT_CONNECTION_ATTEMPT_TIMEOUT_MS
     this.reconnectDelayMs = options.reconnectDelayMs ?? DEFAULT_CONNECTION_RETRY_DELAY_MS
@@ -109,6 +176,7 @@ export class TelegramConnectorAdapter implements ConnectorAdapter {
     this.resumeGapMs = options.resumeGapMs ?? TELEGRAM_RESUME_GAP_MS
     this.inboxStore = options.inboxStore
     this.proxy = options.proxy ?? DIRECT_CONNECTOR_PROXY_TRANSPORT
+    if (options.boardStatePath) this.boardStatePath = options.boardStatePath
   }
 
   async start(config: ConnectorAdapterConfig, context: ConnectorAdapterContext): Promise<void> {
@@ -124,6 +192,14 @@ export class TelegramConnectorAdapter implements ConnectorAdapter {
     this.inboxPush = isInboxPushEnabled(config.settings)
     this.token = token
     this.adapterContext = context
+    // Adopt a board from a previous run, but send nothing: the board only ever
+    // becomes visible when the operator runs /watchers. A restart therefore
+    // resumes an open board in place instead of posting a second copy.
+    const boardState = await loadTelegramBoardState(this.boardStatePath)
+    this.boardChatId = boardState.chatId
+    this.boardMessageId = boardState.messageId
+    this.boardIndex = boardState.index
+    this.boardExpanded = new Set(boardState.expanded)
     this.registerCommands(context)
     this.stopped = false
     this.abort = new AbortController()
@@ -163,6 +239,185 @@ export class TelegramConnectorAdapter implements ConnectorAdapter {
     await this.loop?.catch(() => undefined)
     this.loop = undefined
     this.tracker.stopped()
+  }
+
+  /**
+   * The Telegram board is on-demand: it exists only because the operator ran
+   * /watchers, so the Inbox-push toggle must not be able to freeze it.
+   */
+  boardIgnoresInboxPush(): boolean {
+    return true
+  }
+
+  /**
+   * Reconcile the on-demand watcher board against one Alice push.
+   *
+   * A closed board is a no-op: that is what keeps the board from ever
+   * appearing in the chat uninvited. Nothing is queued or retried, because a
+   * board is a live view rather than a durable message - a missed frame is
+   * simply replaced by the next one.
+   */
+  async syncWatcherBoard(board: WatcherBoardSync): Promise<void> {
+    this.boardItems = board.items
+    this.boardRefreshSeconds = board.refreshSeconds
+    if (this.boardMessageId === null) return
+    // Clamp so a watcher removed while the operator was viewing it does not
+    // leave the pager pointing past the end of the list.
+    this.boardIndex = clampBoardIndex(this.boardIndex, board.items.length)
+    await this.renderBoard().catch(() => undefined)
+  }
+
+  /** Assemble the current board state into one sendable form. */
+  private buildBoardForm(): TelegramWatcherBoardForm {
+    return formatTelegramWatcherBoard({
+      items: this.boardItems,
+      index: this.boardIndex,
+      expanded: this.boardExpanded,
+      frame: this.boardFrame++,
+      nowIso: new Date().toISOString(),
+      refreshSeconds: this.boardRefreshSeconds,
+    })
+  }
+
+  /** Render and edit the OPEN board in place. No-op when the board is closed. */
+  private async renderBoard(): Promise<void> {
+    if (this.boardMessageId === null || this.boardChatId === null || !this.bot) return
+    const form = this.buildBoardForm()
+    this.boardIndex = form.index
+    const markup = toInlineKeyboard(form.actions)
+    await this.bot.api.editMessageText(
+      this.boardChatId,
+      this.boardMessageId,
+      form.html,
+      { parse_mode: 'HTML', ...(markup ? { reply_markup: markup } : {}) },
+    )
+  }
+
+  /**
+   * Open the board, or re-adopt an already-open one.
+   *
+   * This and renderBoard are the ONLY paths that touch a board message, which
+   * is what makes the board on-demand: nothing is ever posted until the
+   * operator runs /watchers. Re-adopting edits the existing message instead of
+   * sending a second one, so the chat never accumulates stale cards.
+   */
+  private async openBoard(ctx: Context): Promise<void> {
+    const chatId = ctx.chat?.id
+    if (!chatId) return
+    const form = this.buildBoardForm()
+    this.boardIndex = form.index
+    const markup = toInlineKeyboard(form.actions)
+    const options = {
+      parse_mode: 'HTML' as const,
+      ...(markup ? { reply_markup: markup } : {}),
+    }
+    if (this.boardMessageId !== null && this.boardChatId !== null) {
+      try {
+        await ctx.api.editMessageText(this.boardChatId, this.boardMessageId, form.html, options)
+        return
+      } catch (error) {
+        // `message is not modified` means the board ALREADY shows exactly this.
+        // That is success, not failure — the operator asked for a board that is
+        // on screen. Rethrowing here is what made `/watchers` appear to do
+        // nothing whenever the live 5s tick had already drawn the current state.
+        if (isTelegramMessageNotModified(error)) return
+        // The operator deleted the board out-of-band (or Telegram discarded the
+        // id). Posting a fresh one is the honest recovery — doing nothing would
+        // look like a broken command.
+        if (!isTelegramMessageGone(error)) throw error
+        this.boardMessageId = null
+        this.boardChatId = null
+      }
+    }
+
+    const sent = await ctx.reply(form.html, options)
+    this.boardChatId = chatId
+    this.boardMessageId = sent.message_id
+    await this.persistBoard()
+  }
+
+  private async persistBoard(): Promise<void> {
+    const state: TelegramBoardState = {
+      chatId: this.boardChatId,
+      messageId: this.boardMessageId,
+      index: this.boardIndex,
+      expanded: [...this.boardExpanded],
+    }
+    await saveTelegramBoardState(state, this.boardStatePath).catch(() => undefined)
+  }
+
+  /**
+   * Handle one board button press.
+   *
+   * Every branch edits the SAME message, so the board never multiplies. Close
+   * is the only destructive transport action, and Delete does NOT remove the
+   * card optimistically: Alice owns watch state, so a refused delete must not
+   * be indistinguishable from a successful one. The watcher drops off on a
+   * later push once Alice has really removed it.
+   */
+  private async handleWatchControl(
+    ctx: Context,
+    context: ConnectorAdapterContext,
+    control: TelegramWatchControl,
+  ): Promise<void> {
+    if (!this.isOwner(String(ctx.from?.id ?? ''))) {
+      await ctx.answerCallbackQuery({ text: 'Only the linked owner can manage watchers.' })
+      return
+    }
+    await ctx.answerCallbackQuery()
+
+    if (control.kind === 'close') {
+      const chatId = this.boardChatId
+      const messageId = this.boardMessageId
+      this.boardChatId = null
+      this.boardMessageId = null
+      this.boardIndex = 0
+      this.boardExpanded.clear()
+      await this.persistBoard()
+      if (chatId !== null && messageId !== null) {
+        await ctx.api.deleteMessage(chatId, messageId).catch(() => undefined)
+      }
+      return
+    }
+
+    const item = this.boardItems[clampBoardIndex(this.boardIndex, this.boardItems.length)]
+    if (!item) {
+      await ctx.editMessageText('No watchers armed. Arm one in OpenAlice, then send /watchers again.')
+        .catch(() => undefined)
+      return
+    }
+
+    if (control.kind === 'next' || control.kind === 'prev') {
+      this.boardIndex = clampBoardIndex(
+        this.boardIndex + (control.kind === 'next' ? 1 : -1),
+        this.boardItems.length,
+      )
+      await this.renderBoard().catch(() => undefined)
+      await this.persistBoard()
+      return
+    }
+
+    if (control.kind === 'toggle') {
+      this.boardExpanded = toggleExpanded(this.boardExpanded, item.watcherId)
+      await this.renderBoard().catch(() => undefined)
+      await this.persistBoard()
+      return
+    }
+
+    const result = await context.enqueueWatchRequest({
+      action: 'delete',
+      workspaceId: item.workspaceId,
+      watcherId: item.watcherId,
+    }).then(() => ({ ok: true, message: 'accepted' })).catch((error) => ({
+      ok: false,
+      message: error instanceof Error ? error.message : String(error),
+    }))
+    await ctx.answerCallbackQuery({
+      text: result.ok
+        ? `Delete requested for ${item.spec.pair || item.watcherId}. The card disappears once OpenAlice confirms.`
+        : `Could not delete watcher: ${result.message}`,
+      show_alert: !result.ok,
+    }).catch(() => undefined)
   }
 
   async deliver(notification: InboxNotification): Promise<void> {
@@ -224,7 +479,9 @@ export class TelegramConnectorAdapter implements ConnectorAdapter {
       this.tracker.attempt()
       try {
         if (message.phase === 'accepted') {
-          await this.startDraft(message.conversationId)
+          await this.startDraft(message.conversationId, message.activity)
+        } else if (message.activity) {
+          await this.updateActivity(message.conversationId, message.activity)
         } else if (message.text) {
           await this.updateDraft(message.conversationId, message.text)
         }
@@ -375,6 +632,24 @@ export class TelegramConnectorAdapter implements ConnectorAdapter {
         await ctx.reply('Could not open UTA. Check OpenAlice logs.').catch(() => undefined)
       })
     })
+    bot.command('watchers', async (ctx) => {
+      if (ctx.chat.type !== 'private' || !ctx.from) return
+      if (!this.isOwner(String(ctx.from.id))) {
+        await ctx.reply('This command is only available to the linked owner.')
+        return
+      }
+      await this.openBoard(ctx).catch(async (error) => {
+        this.tracker.degraded(error)
+        await ctx.reply('Could not open the watcher board. Check OpenAlice logs.').catch(() => undefined)
+      })
+    })
+    bot.command('watchers', async (ctx) => {
+      if (ctx.chat.type !== 'private' || !ctx.from) return
+      await this.openBoard(ctx).catch(async (error) => {
+        this.tracker.degraded(error)
+        await ctx.reply('Could not open the watcher board. Check OpenAlice logs.').catch(() => undefined)
+      })
+    })
     bot.on('callback_query:data', async (ctx) => {
       await this.handleControl(ctx, context).catch(async (error) => {
         this.tracker.degraded(error)
@@ -383,7 +658,7 @@ export class TelegramConnectorAdapter implements ConnectorAdapter {
     })
 
     for (const command of TELEGRAM_CONNECTOR_DEFINITION.commands) {
-      if (command.name === 'model' || command.name === 'inbox' || command.name === 'settings' || command.name === 'uta') continue
+      if (command.name === 'model' || command.name === 'inbox' || command.name === 'settings' || command.name === 'uta' || command.name === 'watchers') continue
       bot.command(command.name, async (ctx) => {
         if (ctx.chat.type !== 'private' || !ctx.from) return
         const handled = await context.commands.execute({
@@ -564,6 +839,11 @@ export class TelegramConnectorAdapter implements ConnectorAdapter {
   private async handleControl(ctx: Context, context: ConnectorAdapterContext): Promise<void> {
     const data = ctx.callbackQuery?.data
     if (!data) return
+    const watchControl = parseTelegramWatchControl(data)
+    if (watchControl) {
+      await this.handleWatchControl(ctx, context, watchControl)
+      return
+    }
     if (data.startsWith('mdl:')) {
       if (ctx.chat?.type !== 'private' || !this.isOwner(String(ctx.from?.id ?? '')) || !context.sessionModel) {
         await ctx.answerCallbackQuery({ text: 'Only the linked owner can change settings.' }); return
@@ -724,17 +1004,17 @@ export class TelegramConnectorAdapter implements ConnectorAdapter {
     this.stopDraft(conversationId)
   }
 
-  private async startDraft(conversationId: string): Promise<void> {
+  private async startDraft(conversationId: string, activity?: OwnerChatActivity): Promise<void> {
     if (this.finishedDrafts.has(conversationId)) return
     const current = this.drafts.get(conversationId)
     if (current) return // Alice's activity lease heartbeat must not erase draft text.
     this.stopDraft(conversationId)
-    const session: TelegramDraftSession = {
-      draftId: telegramDraftId(conversationId),
-      typingFallback: false,
-      stopped: false,
-      pending: Promise.resolve(),
-    }
+    const session = createDraftSession(conversationId)
+    // Seed the slot so the turn is visibly alive from the moment it starts.
+    // The model's first token can take many seconds, and an empty slot in that
+    // gap is indistinguishable from a stalled turn.
+    session.activity = activity ?? { toolCalls: 0, toolFailures: 0 }
+    session.lastActivityKey = JSON.stringify(session.activity)
     this.drafts.set(conversationId, session)
     try {
       await this.queueDraftRefresh(conversationId, session)
@@ -745,17 +1025,47 @@ export class TelegramConnectorAdapter implements ConnectorAdapter {
 
   private async updateDraft(conversationId: string, markdown: string): Promise<void> {
     if (this.finishedDrafts.has(conversationId)) return
-    let session = this.drafts.get(conversationId)
-    if (!session) {
-      session = {
-        draftId: telegramDraftId(conversationId),
-        typingFallback: false,
-        stopped: false,
-        pending: Promise.resolve(),
-      }
-      this.drafts.set(conversationId, session)
-    }
+    const session = this.drafts.get(conversationId) ?? createDraftSession(conversationId)
+    this.drafts.set(conversationId, session)
     session.markdown = markdown
+    session.activity = undefined
+    session.lastActivityKey = undefined
+    session.refreshedAt = undefined
+    try {
+      await this.queueDraftRefresh(conversationId, session)
+    } finally {
+      this.armDraftHeartbeat(conversationId, session)
+    }
+  }
+
+  /**
+   * Point the ephemeral slot at live turn activity.
+   *
+   * The slot is EDITED in place, never appended to — Alice reuses one message id
+   * per turn, so this replaces whatever the slot showed before. That is what
+   * makes the working indicator vanish when the real reply arrives: Telegram
+   * drafts are transient by construction, so there is no cleanup step and no
+   * leftover "Reading a file" message above the answer.
+   *
+   * An unchanged activity payload still re-arms the heartbeat rather than
+   * returning early: a single tool call can outlive Alice's 1s progress
+   * debounce, and the heartbeat is what keeps the bar moving through it.
+   */
+  private async updateActivity(conversationId: string, activity: OwnerChatActivity): Promise<void> {
+    if (this.finishedDrafts.has(conversationId)) return
+    const session = this.drafts.get(conversationId) ?? createDraftSession(conversationId)
+    this.drafts.set(conversationId, session)
+    const key = JSON.stringify(activity)
+    if (session.lastActivityKey === key) {
+      // Same text, same tool. Only the bar needs to advance, and the heartbeat
+      // already owns that cadence — rendering here would spend an edit on a
+      // frame the next tick would immediately supersede.
+      this.armDraftHeartbeat(conversationId, session)
+      return
+    }
+    session.lastActivityKey = key
+    session.activity = activity
+    session.markdown = undefined
     session.refreshedAt = undefined
     try {
       await this.queueDraftRefresh(conversationId, session)
@@ -776,26 +1086,38 @@ export class TelegramConnectorAdapter implements ConnectorAdapter {
   private async refreshDraft(session: TelegramDraftSession): Promise<void> {
     if (!this.bot || !this.sessionReady) throw new Error('Telegram bot is not ready')
     const chatId = telegramNumericChatId(this.chatId)
+    const now = Date.now()
     // A text draft is content, not a durable working indicator. Keep typing alive
     // through tool calls and long pauses until the authoritative terminal event.
-    await this.bot.api.sendChatAction(chatId, 'typing')
-    if (session.refreshedAt !== undefined && Date.now() - session.refreshedAt < TELEGRAM_DRAFT_HEARTBEAT_MS) return
-    session.refreshedAt = Date.now()
+    // Telegram's typing action persists ~5s, so it is refreshed on its own
+    // slower schedule rather than on every animation frame.
+    if (session.lastTypingAt === undefined || now - session.lastTypingAt >= TELEGRAM_TYPING_HEARTBEAT_MS) {
+      session.lastTypingAt = now
+      await this.bot.api.sendChatAction(chatId, 'typing')
+    }
+    // Activity re-renders on a much shorter floor than narration: its whole job
+    // is to look alive, and the spinner only moves when a frame is drawn.
+    const floorMs = session.activity ? TELEGRAM_ACTIVITY_RENDER_MS : TELEGRAM_DRAFT_HEARTBEAT_MS
+    if (session.refreshedAt !== undefined && now - session.refreshedAt < floorMs) return
+    session.refreshedAt = now
     if (session.typingFallback) return
+    const render = session.activity
+      ? renderTurnActivity(session.activity, session.frame++)
+      : session.markdown
     try {
-      if (session.markdown) {
-        await this.bot.api.sendRichMessageDraft(chatId, session.draftId, { markdown: session.markdown })
+      if (render) {
+        await this.bot.api.sendRichMessageDraft(chatId, session.draftId, { markdown: render })
       } else {
         await this.bot.api.sendMessageDraft(chatId, session.draftId, '')
       }
       return
     } catch (error) {
-      if (session.markdown) {
+      if (render) {
         try {
           await this.bot.api.sendMessageDraft(
             chatId,
             session.draftId,
-            truncateTelegramText(session.markdown, 4096),
+            truncateTelegramText(render, 4096),
           )
           return
         } catch {
@@ -831,7 +1153,10 @@ export class TelegramConnectorAdapter implements ConnectorAdapter {
   private armDraftHeartbeat(conversationId: string, session: TelegramDraftSession): void {
     if (session.stopped || this.drafts.get(conversationId) !== session) return
     if (session.timer) clearTimeout(session.timer)
-    const delay = TELEGRAM_TYPING_HEARTBEAT_MS
+    // A live activity frame must tick on the ANIMATION cadence; a narration
+    // draft only needs to outlive Telegram's typing TTL. Using the typing
+    // interval here would freeze the spinner at one frame per 4s.
+    const delay = session.activity ? TELEGRAM_ACTIVITY_RENDER_MS : TELEGRAM_TYPING_HEARTBEAT_MS
     session.timer = setTimeout(() => {
       void this.queueDraftRefresh(conversationId, session).catch((error) => {
         this.tracker.degraded(error)
@@ -936,6 +1261,36 @@ function toInlineKeyboard(
 
 function sessionKey(chatId: number, messageId: number): string {
   return `${chatId}:${messageId}`
+}
+
+/**
+ * True when Telegram refused an edit because nothing actually changed.
+ *
+ * This is a SUCCESS in disguise, not a failure: the message already carries the
+ * content and markup we asked for. Treating it as an error is what made
+ * `/watchers` appear broken whenever the live board was already up to date.
+ */
+function isTelegramMessageNotModified(error: unknown): boolean {
+  if (!(error instanceof GrammyError)) return false
+  if (error.error_code !== 400) return false
+  return error.description.toLowerCase().includes('message is not modified')
+}
+
+/**
+ * True when Telegram says the message no longer exists.
+ *
+ * Tells "the operator deleted the board" (recoverable: post a fresh one) apart
+ * from a real failure (must surface, not silently re-post).
+ */
+function isTelegramMessageGone(error: unknown): boolean {
+  if (!(error instanceof GrammyError)) return false
+  if (error.error_code === 404) return true
+  if (error.error_code !== 400) return false
+  const description = error.description.toLowerCase()
+  return description.includes('message to edit not found')
+    || description.includes('message_id_invalid')
+    || description.includes('message can not be edited')
+    || description.includes('message cant be edited')
 }
 
 function requiredString(config: ConnectorAdapterConfig, key: string): string {

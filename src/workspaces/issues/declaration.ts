@@ -48,6 +48,8 @@ import { parse as parseYaml } from 'yaml'
 import { z } from 'zod'
 
 import { isValidScheduleTimezone, type Schedule } from '../../core/schedule-expr.js'
+import { watchSpecSchema } from '../watch/schema.js'
+import type { WatchSpec } from '../watch/types.js'
 import {
   isModelReasoningEffort,
   type ModelReasoningEffort,
@@ -184,6 +186,11 @@ const issueFrontmatterObjectSchema = z.object({
   assignee: issueAssigneeFileSchema.optional(),
   /** Present iff the issue self-schedules. Absent ⇒ pure board work item. */
   when: issueWhenSchema.optional(),
+  /** Optional deterministic market watcher. A watch makes the Issue eligible for
+   *  the 30-second watch loop, which evaluates its rules against live market
+   *  data and wakes the owning Session when a rule first fires. A watch without
+   *  `when` is a pure event watcher; the two are independent. */
+  watch: watchSpecSchema.optional(),
   /** Deprecated read compatibility only. New files keep What in the markdown
    * document below frontmatter so the human-visible work definition and runtime
    * prompt cannot drift. */
@@ -240,7 +247,7 @@ export const issueFrontmatterSchema = issueFrontmatterObjectSchema
           ? value.when ? NEW_EACH_RUN_ASSIGNEE : UNASSIGNED_ASSIGNEE
           : value.assignee === DEPRECATED_NEW_ASSIGNEE
             ? NEW_THEN_RESUME_ASSIGNEE
-            : value.assignee ?? (value.when ? NEW_THEN_RESUME_ASSIGNEE : UNASSIGNED_ASSIGNEE),
+            : value.assignee ?? (value.when || value.watch ? NEW_THEN_RESUME_ASSIGNEE : UNASSIGNED_ASSIGNEE),
     }
   })
   .superRefine((value, ctx) => {
@@ -251,21 +258,21 @@ export const issueFrontmatterSchema = issueFrontmatterObjectSchema
         message: 'credential and credentialSource are mutually exclusive',
       })
     }
-    if (value.when && (value.assignee === HUMAN_ASSIGNEE || value.assignee === UNASSIGNED_ASSIGNEE)) {
+    if ((value.when || value.watch) && (value.assignee === HUMAN_ASSIGNEE || value.assignee === UNASSIGNED_ASSIGNEE)) {
       ctx.addIssue({
         code: 'custom',
         path: ['assignee'],
-        message: 'scheduled issues must use @new-each-run, @new-then-resume, or an exact @resumeId',
+        message: 'scheduled or watched issues must use @new-each-run, @new-then-resume, or an exact @resumeId',
       })
     }
-    if (!value.when && (
+    if (!value.when && !value.watch && (
       value.assignee === NEW_EACH_RUN_ASSIGNEE
       || value.assignee === NEW_THEN_RESUME_ASSIGNEE
     )) {
       ctx.addIssue({
         code: 'custom',
         path: ['assignee'],
-        message: `${value.assignee} needs a schedule`,
+        message: `${value.assignee} needs a schedule or a watch`,
       })
     }
     if (issueAssigneeResumeId(value.assignee)) {
@@ -299,6 +306,11 @@ export interface IssueRecord extends IssueFrontmatter {
   /** Markdown work definition below frontmatter. For a scheduled Issue this is
    * the exact prompt sent to the Agent Runtime. */
   what: string
+}
+
+/** True when an Issue carries a market watcher. */
+export function hasWatch(issue: Pick<IssueRecord, 'watch'>): issue is Pick<IssueRecord, 'watch'> & { watch: WatchSpec } {
+  return issue.watch !== undefined
 }
 
 /** A file that could not be read/validated — reported, never propagated. */

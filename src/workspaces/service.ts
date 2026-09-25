@@ -93,6 +93,12 @@ import {
   type ScheduleSnapshotTask,
   type ScheduleSnapshotWorkspace,
 } from './schedule/declaration.js';
+import { WatchLoop } from './watch/loop.js';
+import { createWatchSnapshotProvider } from './watch/snapshot.js';
+import { readWatchRecord } from './watch/store.js';
+import { buildWatchAlert, buildWatchWakePrompt } from './watch/wake-prompt.js';
+import { startWatcherBoardPublisher } from '../services/connector-client/watcher-board-bridge.js';
+import type { BarService } from '../domain/market-data/bars/types.js';
 import {
   annotateNameCollisions,
   detailIssue,
@@ -104,6 +110,7 @@ import {
   type IssueAssigneeSession,
   issueRunRecord,
   type IssueFiringMarkers,
+  type IssueWatchStatus,
   type IssuesSnapshot,
   type IssuesSnapshotIssue,
   type IssuesSnapshotWorkspace,
@@ -680,6 +687,12 @@ export interface CreateWorkspaceServiceOptions {
   readonly mcpBaseUrl?: string;
   /** Internal test seam. Production omits this and keeps the 60-second scan. */
   readonly scheduleScannerIntervalMs?: number;
+  /** Federated bar access for deterministic market watchers. When absent the
+   *  watch loop does not start, so `watch:` blocks stay inert (tests that do
+   *  not exercise market data need no provider). */
+  readonly barService?: BarService;
+  /** Internal test seam. Production omits this and keeps the 30-second cadence. */
+  readonly watchLoopIntervalMs?: number;
   /**
    * Internal test seam. Production omits this and keeps the real process
    * runner. Issue/handoff specs inject a fake so they do not spawn Node.
@@ -2088,7 +2101,10 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
               const comments = await readIssueComments(issueWorkspace.dir, reply.issueId);
               const comment = comments.ok ? comments.comments.find(row => row.id === reply.commentId) : undefined;
               if (comment) desk = { connectorId: issue.connectorDesk, ...(comment.via ? { inboundConnectorId: comment.via } : {}) };
-            } else if (trigger?.metadata?.connectorId === issue.connectorDesk) {
+            } else if (
+              trigger?.metadata?.kind === 'connector-cron-issue'
+              && trigger.metadata.connectorId === issue.connectorDesk
+            ) {
               desk = { connectorId: issue.connectorDesk };
             }
           }
@@ -2489,6 +2505,80 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
       ? { intervalMs: opts.scheduleScannerIntervalMs }
       : {}),
   });
+
+  // ── Deterministic market watchers. A separate 30-second loop, deliberately
+  // independent of the schedule scanner: a slow quote fetch must never delay a
+  // calendar fire, and a calendar fire must never delay a market reaction. The
+  // hot path is one market fetch per distinct pair per tick plus pure
+  // arithmetic — no agent process exists while a condition is false.
+  // The persistent watcher board is published to the connector service on every
+  // watch tick, so an operator's private chat shows what the loop is doing
+  // without opening OpenAlice. It is fire-and-forget: a disabled or unreachable
+  // connector is not an error the loop must know about.
+/**
+ * Transports a watcher trigger alert is pushed to.
+ *
+ * Deliberately explicit rather than "every enabled adapter": the alert is the
+ * highest-signal message this system produces, and an allow-list keeps this
+ * additive for connectors that have not opted into it. Discord and Telegram are
+ * the two transports with an owner-facing desk surface.
+ *
+ * The alert is SYSTEM-GENERATED — built here by the deterministic evaluator,
+ * never written by a model. The woken Session's own analysis arrives separately
+ * through the desk reply, so the two never double up.
+ */
+const WATCH_ALERT_CONNECTORS: string[] = ['discord', 'telegram'];
+
+  const publishWatcherBoard = startWatcherBoardPublisher();
+  const watchLoop = opts.barService
+    ? new WatchLoop({
+        registry,
+        snapshot: createWatchSnapshotProvider({
+          barService: opts.barService,
+          logger: launcherLogger.child({ scope: 'watch-snapshot' }),
+        }),
+        logger: launcherLogger.child({ scope: 'watch' }),
+        onBoard: publishWatcherBoard,
+        ...(opts.watchLoopIntervalMs !== undefined
+          ? { intervalMs: opts.watchLoopIntervalMs }
+          : {}),
+        onFire: async ({ workspace, issue, spec, events, snapshot, terminal }) => {
+          // A machine alert, not model prose: this body is assembled from the
+          // evaluator's own event list, so the operator learns a condition fired
+          // even if the woken Session never replies. Routed by an adapter
+          // allow-list, so the ordinary Inbox fan-out is unchanged for every
+          // other producer.
+          if (inboxStore) {
+            try {
+              await inboxStore.append({
+                workspaceId: workspace.id,
+                workspaceLabel: workspace.tag,
+                body: buildWatchAlert(issue, spec, events, snapshot),
+                deliverTo: WATCH_ALERT_CONNECTORS,
+              })
+            } catch (err) {
+              launcherLogger.warn('watch.alert_failed', {
+                wsId: workspace.id,
+                issueId: issue.id,
+                err,
+              })
+            }
+          }
+
+          // Wake the owning Session with the plan it wrote plus what just
+          // happened. Shares the scanner's dispatch/claim exclusion, so a
+          // calendar fire and a watch fire can never double-dispatch.
+          const first = events[0]
+          await scheduleScanner.runWatchFire({
+            workspaceId: workspace.id,
+            issueId: issue.id,
+            prompt: buildWatchWakePrompt(issue, spec, events, snapshot, { terminal }),
+            conditionKey: first.conditionKey,
+            eventType: first.eventType,
+          })
+        },
+      })
+    : null;
   // Read-only aggregation for the Schedules dashboard (GET /api/schedule).
   // Walks each workspace's live declaration + the scanner's marker; the route
   // layer stays a thin adapter and the marker store stays private.
@@ -2563,14 +2653,41 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
         await Promise.all([...ownerWorkspaceIds].map((wsId) => sessionRegistry.ensureLoaded(wsId)));
         await observeIssueRecords(ws, res.issues);
         const needsDefaultAgent = res.issues.some((issue) =>
-          Boolean(issue.when) && !issueAssigneeResumeId(issue.assignee) && !issue.agent,
+          Boolean(issue.when || issue.watch) && !issueAssigneeResumeId(issue.assignee) && !issue.agent,
         );
         const defaultIssueAgent = needsDefaultAgent
           ? await resolveHeadlessDefaultAgentId(ws)
           : undefined;
-        const issues: IssuesSnapshotIssue[] = res.issues.filter((issue) => !isConnectorDeskIssue(issue)).map((issue) => {
-          // Unscheduled ⇒ pure board work item, no firing markers.
-          if (!issue.when) return snapshotBoardIssue(issue, null);
+        const boardNowIso = new Date(nowMs).toISOString();
+        const issues: IssuesSnapshotIssue[] = await Promise.all(
+          res.issues.filter((issue) => !isConnectorDeskIssue(issue)).map(async (issue) => {
+          // A watched Issue reports liveness from the watch loop's persisted
+          // state even without a schedule, so its run signal and the assignee
+          // dot stay honest. The sidecar read is bounded to actual watchers.
+          if (!issue.when) {
+            if (!issue.watch) return snapshotBoardIssue(issue, null);
+            const record = await readWatchRecord(ws.dir, issue.id, boardNowIso);
+            const assigneeSession = resolveIssueAssigneeSession(issue.assignee);
+            return snapshotBoardIssue(issue, {
+              lastFiredAtMs: null,
+              nextDueAtMs: null,
+              automationHealth: issueAutomationHealth({
+                status: issue.status,
+                nowMs,
+                nextDueAtMs: null,
+                ownerState: issueAutomationOwnerState(issue.assignee, assigneeSession),
+                runtime: issueRuntimeAvailability(issue, defaultIssueAgent, availability),
+                watch: {
+                  terminal: record?.state.terminal ?? false,
+                  lastChecked: record?.state.lastChecked ?? null,
+                  lastError: record?.state.lastError ?? null,
+                  errorCount: record?.state.errorCount ?? 0,
+                  backoffUntil: record?.state.backoffUntil ?? null,
+                },
+                ...(watchLoop ? { watchIntervalSeconds: watchLoop.intervalSeconds } : {}),
+              }),
+            });
+          }
           // Scheduled ⇒ reuse the schedule snapshot's math so the board's
           // last/next match the Schedules dashboard exactly.
           const fired = snapshotScheduledIssue(
@@ -2598,7 +2715,8 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
               }),
             },
           );
-        });
+          }),
+        );
         return { wsId: ws.id, tag: ws.tag, status: 'ok', issues };
       }),
     );
@@ -2695,8 +2813,19 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
       artifact: { kind: 'issue', workspaceId: ws.id, issueId: issue.id },
     }));
     const activity = issueActivityRecords(provenance, comments);
+    // Watcher status is detail-only. The board derives its badge from the
+    // authored spec alone; a listing must never fan out a sidecar read per Issue.
+    let watchStatus: IssueWatchStatus | undefined;
+    if (issue.watch) {
+      const record = await readWatchRecord(ws.dir, issue.id, new Date().toISOString());
+      watchStatus = {
+        spec: issue.watch,
+        state: record?.state ?? null,
+        events: record?.events ?? [],
+      };
+    }
     return {
-      issue: detailIssue(issue, markers),
+      issue: detailIssue(issue, markers, watchStatus),
       ...(assigneeSession ? { assigneeSession } : {}),
       comments,
       runs,
@@ -3284,6 +3413,9 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
   // Recovery owns the active/departed boundary. Scheduled work must not see an
   // interrupted offboarding/upgrade row between registry load and repair.
   scheduleScanner.start();
+  // Watch evaluation reads live Issues and market data; it is independent of
+  // the schedule clock and of Workspace lifecycle recovery.
+  watchLoop?.start();
 
   const detectAgents = (): Record<string, AgentAvailability> => {
     const out: Record<string, AgentAvailability> = {};
@@ -3403,6 +3535,7 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
     shuttingDown = true;
     launcherLogger.info('workspaces.dispose', { reason, activeSessions: pool.size() });
     scheduleScanner.stop();
+    watchLoop?.stop();
     stopInboxActivity?.();
     await harnessSurfaces.dispose();
     pool.disposeAll('plugin shutdown');

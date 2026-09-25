@@ -178,6 +178,7 @@ export function toNotification(
     title: `Inbox update from ${entry.workspaceLabel ?? entry.workspaceId}`,
     body,
     ...(attachments.length > 0 ? { attachments: attachments.map(({ attachment }) => attachment) } : {}),
+    ...(entry.deliverTo && entry.deliverTo.length > 0 ? { deliverTo: [...entry.deliverTo] } : {}),
     ...(baseUrl ? { href: `${baseUrl}/inbox` } : {}),
     ...(entry.origin?.resumeId || entry.origin?.agent ? {
       provenance: {

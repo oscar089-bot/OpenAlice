@@ -22,6 +22,8 @@ import {
   decodeConnectorAttachment,
   formatInboxNotification,
 } from './shared.js'
+import { DiscordWatcherBoard } from './discord-watcher-board.js'
+import { loadDiscordBoardState, saveDiscordBoardState, type DiscordBoardState } from './discord-board-store.js'
 
 export class DiscordConnectorAdapter implements ConnectorAdapter {
   readonly id = 'discord'
@@ -29,11 +31,35 @@ export class DiscordConnectorAdapter implements ConnectorAdapter {
   private client?: Client
   private ownerUserId?: string
   private readonly proxy: ConnectorProxyTransport
+  private readonly board: DiscordWatcherBoard
+  /** Adapter-owned sealed state path for the watcher→message map. */
+  private readonly boardStatePath?: string
+  /** Persisted board state: message ids + which cards are expanded. */
+  private boardState: DiscordBoardState = { messages: {}, expanded: {} }
+  /** Dedicated watcher-board channel, when the operator configured one. */
+  private boardChannelId?: string
+  /** Adapter context, held so a board button can enqueue an action. */
+  private context?: ConnectorAdapterContext
 
   classifyStartFailure = classifyNetworkStartFailure
 
-  constructor(options: { proxy?: ConnectorProxyTransport } = {}) {
+  constructor(options: { proxy?: ConnectorProxyTransport; boardStatePath?: string } = {}) {
     this.proxy = options.proxy ?? DIRECT_CONNECTOR_PROXY_TRANSPORT
+    if (options.boardStatePath) this.boardStatePath = options.boardStatePath
+    this.board = new DiscordWatcherBoard({
+      client: () => this.client,
+      ownerUserId: () => this.ownerUserId,
+      boardChannelId: () => this.boardChannelId,
+      knownState: () => this.boardState,
+      persistState: async (state) => {
+        // Transport state, not operator config: the settings mutation path
+        // rejects undeclared keys, and a human must not see or edit this map.
+        this.boardState = state
+        await saveDiscordBoardState(state, this.boardStatePath)
+      },
+      canManage: (userId) => this.isOwner(userId),
+      requestDelete: (watcherId) => this.requestWatchDelete(watcherId),
+    })
   }
 
   async start(config: ConnectorAdapterConfig, context: ConnectorAdapterContext): Promise<void> {
@@ -48,6 +74,9 @@ export class DiscordConnectorAdapter implements ConnectorAdapter {
       const applicationId = requiredString(config, 'applicationId')
       const botToken = requiredString(config, 'botToken')
       this.ownerUserId = optionalString(config, 'ownerUserId')
+      this.boardChannelId = optionalString(config, 'boardChannelId')
+      this.context = context
+      this.boardState = await loadDiscordBoardState(this.boardStatePath)
 
       this.registerCommands(context)
       await this.publishSlashCommands(applicationId, botToken, discord)
@@ -59,6 +88,12 @@ export class DiscordConnectorAdapter implements ConnectorAdapter {
       })
       this.client = client
       client.on(Events.InteractionCreate, async (interaction) => {
+        // Board buttons are routed by custom_id, never by a collector: the
+        // cards outlive the process, and a collector's view dies with it.
+        if (interaction.isButton()) {
+          await this.board.handleButton(interaction).catch(() => undefined)
+          return
+        }
         if (!interaction.isChatInputCommand()) return
         const handled = await context.commands.execute({
           connectorId: this.id,
@@ -99,9 +134,19 @@ export class DiscordConnectorAdapter implements ConnectorAdapter {
   }
 
   async stop(): Promise<void> {
+    this.board.stop()
     this.client?.destroy()
     this.client = undefined
     this.tracker.stopped()
+  }
+
+  /**
+   * Reconcile the persistent watcher board against one Alice push. The board
+   * owns its own message ids and pulse timer; this method only forwards state.
+   */
+  async syncWatcherBoard(board: import('@traderalice/connector-protocol').WatcherBoardSync): Promise<void> {
+    if (!this.client?.isReady() || !this.ownerUserId) return
+    await this.board.sync(board)
   }
 
   async deliver(notification: InboxNotification): Promise<void> {
@@ -202,6 +247,32 @@ export class DiscordConnectorAdapter implements ConnectorAdapter {
 
   private isOwner(userId: string): boolean {
     return Boolean(this.ownerUserId && this.ownerUserId === userId)
+  }
+
+  /**
+   * Ask Alice to delete a watcher.
+   *
+   * The connector cannot delete watch state itself \u2014 Alice owns the watch store
+   * and the board is a VIEW of it. So this enqueues an action and reports
+   * acceptance, NOT completion: the card disappears on a later board push once
+   * Alice has actually removed the watcher. Reporting "deleted" here would let a
+   * refused or failed removal look identical to a successful one.
+   */
+  private async requestWatchDelete(input: { watcherId: string; workspaceId: string }): Promise<{ ok: boolean; message: string }> {
+    if (!this.context) return { ok: false, message: 'Connector context is not available.' }
+    if (!input.workspaceId) {
+      return { ok: false, message: 'This card is not bound to a workspace yet; wait for the next board refresh.' }
+    }
+    try {
+      await this.context.enqueueWatchRequest({
+        action: 'delete',
+        workspaceId: input.workspaceId,
+        watcherId: input.watcherId,
+      })
+      return { ok: true, message: 'accepted' }
+    } catch (error) {
+      return { ok: false, message: error instanceof Error ? error.message : String(error) }
+    }
   }
 
   private async publishSlashCommands(

@@ -5,14 +5,11 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { ConnectorClient } from '@traderalice/connector-protocol'
 
-import type { HeadlessTurnProgress } from '../headless-progress.js'
 import { createTelegramConnectorDesk } from './telegram-connector.js'
 import {
-  deskProgressMessageId,
   deskProgressScope,
   projectDeskComment,
   projectDeskLifecycle,
-  sealedProgressTexts,
   shouldProjectDeskComment,
 } from './telegram-desk-project.js'
 
@@ -29,19 +26,6 @@ afterEach(async () => {
   await rm(home, { recursive: true, force: true })
 })
 
-function progress(blocks: HeadlessTurnProgress['blocks']): HeadlessTurnProgress {
-  return {
-    updatedAt: 1,
-    assistantText: [...blocks].reverse().find((block) => block.type === 'text')?.text ?? null,
-    blocks,
-    metrics: {
-      textBlocks: blocks.filter((block) => block.type === 'text').length,
-      toolCalls: blocks.filter((block) => block.type === 'tool').length,
-      toolFailures: 0,
-    },
-  }
-}
-
 function mockClient() {
   const sent: Array<{ id: string; conversationId: string; phase: string; text?: string }> = []
   const client = {
@@ -52,52 +36,6 @@ function mockClient() {
   } as unknown as ConnectorClient
   return { client, sent }
 }
-
-describe('sealedProgressTexts', () => {
-  it('sends only the last consecutive text before a tool or error', () => {
-    expect(sealedProgressTexts(progress([
-      { type: 'text', text: "I'll" },
-      { type: 'text', text: "I'll check the book." },
-      { type: 'tool', id: 't1', name: 'Read', status: 'running' },
-      { type: 'text', text: 'The overnight risk is low.' },
-    ]))).toEqual(["I'll check the book."])
-  })
-
-  it('ships each sealed narration and keeps the trailing reply local', () => {
-    expect(sealedProgressTexts(progress([
-      { type: 'text', text: 'Looking at the book.' },
-      { type: 'tool', id: 't1', name: 'Read', status: 'completed' },
-      { type: 'text', text: 'Checking another file.' },
-      { type: 'tool', id: 't2', name: 'Read', status: 'running' },
-      { type: 'text', text: 'Here is the answer.' },
-    ]))).toEqual(['Looking at the book.', 'Checking another file.'])
-  })
-
-  it('does not ship a lone trailing text, tools, or errors', () => {
-    expect(sealedProgressTexts(progress([
-      { type: 'text', text: 'Final answer only.' },
-    ]))).toEqual([])
-    expect(sealedProgressTexts(progress([
-      { type: 'tool', id: 't1', name: 'Read', status: 'running' },
-      { type: 'text', text: 'After the tool.' },
-    ]))).toEqual([])
-    expect(sealedProgressTexts(progress([
-      { type: 'error', message: 'boom' },
-    ]))).toEqual([])
-  })
-
-  it('preserves syntax for Connector to interpret', () => {
-    const snapshot = progress([
-      { type: 'text', text: 'We discussed [[no-reply]] syntax.' },
-      { type: 'tool', id: 't1', name: 'Read', status: 'running' },
-    ])
-    expect(sealedProgressTexts(snapshot)).toEqual(['We discussed [[no-reply]] syntax.'])
-    expect(sealedProgressTexts(snapshot, {
-      kind: 'connector-cron-issue',
-      connectorId: 'telegram',
-    })).toEqual(['We discussed [[no-reply]] syntax.'])
-  })
-})
 
 describe('deskProgressScope', () => {
   it('does not publish an internal ask merely because its subject is a desk Issue', () => {

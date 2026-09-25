@@ -17,6 +17,7 @@ import {
   connectorUtaPresentationSchema,
   inboxNotificationSchema,
   ownerChatMessageSchema,
+  watcherBoardSyncSchema,
 } from '@traderalice/connector-protocol'
 import { ConnectorRegistry } from './core/adapter.js'
 import { DeliveryManager } from './core/delivery-manager.js'
@@ -76,6 +77,13 @@ export async function startConnectorService(): Promise<void> {
     const message = ownerChatMessageSchema.parse(await c.req.json())
     return c.json(connectorDeliveryReceiptSchema.parse(manager.enqueueOwnerChat(message)), 202)
   })
+  app.post('/v1/watcher-board/sync', async (c) => {
+    const board = watcherBoardSyncSchema.parse(await c.req.json())
+    // Delivery is synchronous so a malformed board is visible to the caller;
+    // the fan-out inside the manager still isolates one bad adapter.
+    await manager.syncWatcherBoard(board)
+    return c.json({ ok: true })
+  })
   app.post('/v1/inbound/claim', async (c) => {
     const claim = await manager.claimInbound()
     return c.json({
@@ -116,6 +124,18 @@ export async function startConnectorService(): Promise<void> {
   app.post('/v1/actions/uta/claim', async (c) => {
     const claim = await manager.claimUtaActions()
     return c.json({ claimId: claim.claimId, requests: claim.items.map((item) => item.payload) })
+  })
+  app.post('/v1/actions/watch/claim', async (c) => {
+    const claim = await manager.claimWatchActions()
+    return c.json({ claimId: claim.claimId, requests: claim.items.map((item) => item.payload) })
+  })
+  app.post('/v1/actions/watch/:claimId/ack', async (c) => {
+    await manager.ackActions(c.req.param('claimId'), await workItemIds(c))
+    return c.json({ ok: true })
+  })
+  app.post('/v1/actions/watch/:claimId/release', async (c) => {
+    await manager.releaseActions(c.req.param('claimId'), await workItemIds(c))
+    return c.json({ ok: true })
   })
   app.post('/v1/actions/uta/:claimId/ack', async (c) => {
     await manager.ackActions(c.req.param('claimId'), await workItemIds(c))

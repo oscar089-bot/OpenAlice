@@ -119,6 +119,32 @@ describe('issueAutomationHealth', () => {
     })
   })
 
+  const healthyWatch = { terminal: false, errorCount: 0, lastChecked: '2026-01-01T00:00:00.000Z', lastError: null, backoffUntil: null }
+
+  it('reports the watcher cadence the caller supplies, not a hardcoded interval', () => {
+    // This sentence is shown to the operator. It hardcoded "every 30 seconds"
+    // while the loop already ran at 5s, so the panel described a cadence the
+    // product did not use. Taking the interval from the caller keeps the copy
+    // and the loop from drifting apart again.
+    const health = issueAutomationHealth({ ...base, watch: healthyWatch, watchIntervalSeconds: 5 })
+    expect(health.state).toBe('healthy')
+    expect(health.message).toBe('Watcher is armed and checks the market every 5 seconds.')
+  })
+
+  it('never claims a 30-second cadence', () => {
+    const health = issueAutomationHealth({ ...base, watch: healthyWatch, watchIntervalSeconds: 5 })
+    expect(health.message).not.toContain('30 seconds')
+  })
+
+  it('omits the interval rather than inventing one when the caller cannot supply it', () => {
+    // Lite mode has no bar service, so there is no loop to ask. The message
+    // must stay true instead of falling back to a stale literal.
+    const health = issueAutomationHealth({ ...base, watch: healthyWatch })
+    expect(health.state).toBe('healthy')
+    expect(health.message).toBe('Watcher is armed and checks the market on its polling interval.')
+    expect(health.message).not.toMatch(/\d+ seconds/)
+  })
+
   it('does not let a missing runtime hide an in-flight run or terminal Issue', () => {
     const runtime = { agent: 'grok', displayName: 'Grok', installed: false }
     expect(issueAutomationHealth({

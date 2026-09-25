@@ -1036,3 +1036,103 @@ describe('IssueDetail comment behavior', () => {
     expect(screen.getByRole('button', { name: commentBehavior }).textContent).toContain(customLabel)
   })
 })
+
+describe('IssueDetail market watcher', () => {
+  afterEach(() => {
+    delete scheduledIssue.issue.watch
+  })
+
+  it('renders the authored rules and live state when a watcher is present', () => {
+    scheduledIssue.issue.watch = {
+      spec: {
+        pair: 'BTC-USDT',
+        assetClass: 'crypto',
+        direction: 'LONG',
+        timeframe: '1h',
+        rules: [{ type: 'candle_close', timeframe: '1h', side: 'above', level: 110000 }],
+        invalidationRules: [{ type: 'price_breaks_level', side: 'below', level: 98000 }],
+        managementRules: [],
+      },
+      state: {
+        armedAt: new Date().toISOString(),
+        specFingerprint: 'x',
+        lastChecked: new Date().toISOString(),
+        lastPrice: 101234,
+        lastMarketTimestamp: new Date().toISOString(),
+        lastConfirmedCandle: null,
+        previousConfirmedCandle: null,
+        lastEvent: null,
+        terminal: false,
+        alertedConditions: {},
+        firedConditions: {},
+        cooldownUntil: null,
+        backoffUntil: null,
+        pollCount: 12,
+        errorCount: 0,
+        lastError: null,
+      },
+      events: [],
+    }
+
+    render(<IssueDetail wsId="demo-ws-auto-quant" id="morning-scan" />)
+
+    expect(screen.getByRole('heading', { level: 3, name: 'Market watcher' })).toBeTruthy()
+    expect(screen.getByText(/BTC-USDT/)).toBeTruthy()
+    // The authored candle-close rule and its timeframe are readable.
+    expect(screen.getByText(/Candle close/)).toBeTruthy()
+    // Live facts come from the persisted state, not the authored spec.
+    expect(screen.getByText('101234')).toBeTruthy()
+    expect(screen.getByText('Armed')).toBeTruthy()
+  })
+
+  it('omits the watcher section when the Issue has no watch', () => {
+    render(<IssueDetail wsId="demo-ws-auto-quant" id="morning-scan" />)
+    expect(screen.queryByRole('heading', { level: 3, name: 'Market watcher' })).toBeNull()
+  })
+
+  it('shows a finished watcher as terminal', () => {
+    scheduledIssue.issue.watch = {
+      spec: {
+        pair: 'ETH-USDT',
+        assetClass: 'crypto',
+        direction: 'LONG',
+        timeframe: '15m',
+        rules: [{ type: 'price_breaks_level', side: 'above', level: 3000 }],
+        invalidationRules: [],
+        managementRules: [],
+      },
+      state: {
+        armedAt: new Date().toISOString(),
+        specFingerprint: 'y',
+        lastChecked: new Date().toISOString(),
+        lastPrice: 3100,
+        lastMarketTimestamp: new Date().toISOString(),
+        lastConfirmedCandle: null,
+        previousConfirmedCandle: null,
+        lastEvent: 'TRIGGER_HIT',
+        terminal: true,
+        alertedConditions: {},
+        firedConditions: { 'TRIGGER_HIT:price_breaks_level:above:3000': new Date().toISOString() },
+        cooldownUntil: null,
+        backoffUntil: null,
+        pollCount: 40,
+        errorCount: 0,
+        lastError: null,
+      },
+      events: [{
+        watcherId: 'morning-scan',
+        eventType: 'TRIGGER_HIT',
+        conditionKey: 'TRIGGER_HIT:price_breaks_level:above:3000',
+        message: 'ETH-USDT broke above 3000.',
+        price: 3100,
+        at: new Date().toISOString(),
+      }],
+    }
+
+    render(<IssueDetail wsId="demo-ws-auto-quant" id="morning-scan" />)
+
+    expect(screen.getByText('Finished')).toBeTruthy()
+    expect(screen.getByText('1')).toBeTruthy()
+    expect(screen.getByText(/ETH-USDT broke above 3000/)).toBeTruthy()
+  })
+})

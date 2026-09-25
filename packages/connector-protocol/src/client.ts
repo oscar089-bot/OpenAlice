@@ -7,9 +7,11 @@ import {
   connectorUtaFailureSchema,
   connectorUtaPresentationSchema,
   connectorUtaRequestSchema,
+  connectorWatchRequestSchema,
   inboxNotificationSchema,
   inboundOwnerMessageSchema,
   ownerChatMessageSchema,
+  watcherBoardSyncSchema,
   type ConnectorArtifactDelivery,
   type ConnectorArtifactFailure,
   type ConnectorArtifactRequest,
@@ -19,9 +21,11 @@ import {
   type ConnectorUtaFailure,
   type ConnectorUtaPresentation,
   type ConnectorUtaRequest,
+  type ConnectorWatchRequest,
   type InboxNotification,
   type ConnectorWorkClaim,
   type OwnerChatMessage,
+  type WatcherBoardSync,
 } from './types.js'
 
 export class ConnectorClient {
@@ -70,6 +74,21 @@ export class ConnectorClient {
 
   releaseInbound(claimId: string, itemIds: string[], signal?: AbortSignal): Promise<void> {
     return this.finishWork(`/v1/inbound/${encodeURIComponent(claimId)}/release`, itemIds, signal)
+  }
+
+  /**
+   * Push one persistent watcher board state. Fire-and-forget: the board is a
+   * live view, so a missed frame is corrected by the next one and nothing is
+   * queued or retried.
+   */
+  async syncWatcherBoard(board: WatcherBoardSync, signal?: AbortSignal): Promise<void> {
+    const response = await this.fetchImpl(new URL('/v1/watcher-board/sync', this.baseUrl), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(watcherBoardSyncSchema.parse(board)),
+      signal,
+    })
+    if (!response.ok) throw new Error(`Connector Service watcher board sync failed: ${response.status}`)
   }
 
   async sendOwnerMessage(message: OwnerChatMessage, signal?: AbortSignal): Promise<ConnectorDeliveryReceipt> {
@@ -153,6 +172,35 @@ export class ConnectorClient {
 
   releaseUtaActions(claimId: string, itemIds: string[], signal?: AbortSignal): Promise<void> {
     return this.finishWork(`/v1/actions/uta/${encodeURIComponent(claimId)}/release`, itemIds, signal)
+  }
+
+  /**
+   * Claim owner-initiated watcher actions (delete) for Alice to perform.
+   *
+   * Mirrors `claimUtaActions`: the connector queues the intent, Alice drains it
+   * on its own timer. The connector never reaches into watch state directly,
+   * which is what keeps the watch store single-writer.
+   */
+  async claimWatchActions(signal?: AbortSignal): Promise<ConnectorWorkClaim<ConnectorWatchRequest>> {
+    const response = await this.fetchImpl(new URL('/v1/actions/watch/claim', this.baseUrl), {
+      method: 'POST',
+      signal,
+    })
+    if (!response.ok) throw new Error(`Connector Service watch claim failed: ${response.status}`)
+    const body = await response.json() as { claimId?: unknown; requests?: unknown }
+    const items = Array.isArray(body.requests) ? body.requests.flatMap((request) => {
+      const parsed = connectorWatchRequestSchema.safeParse(request)
+      return parsed.success ? [parsed.data] : []
+    }) : []
+    return { claimId: typeof body.claimId === 'string' ? body.claimId : '', items }
+  }
+
+  ackWatchActions(claimId: string, itemIds: string[], signal?: AbortSignal): Promise<void> {
+    return this.finishWork(`/v1/actions/watch/${encodeURIComponent(claimId)}/ack`, itemIds, signal)
+  }
+
+  releaseWatchActions(claimId: string, itemIds: string[], signal?: AbortSignal): Promise<void> {
+    return this.finishWork(`/v1/actions/watch/${encodeURIComponent(claimId)}/release`, itemIds, signal)
   }
 
   async presentUta(

@@ -24,9 +24,12 @@ accepted and available revisions separately.
 
 ## Ownership
 
-Alice Harness owns complete trees for `alice`, `alice-analysis`, `alice-uta`,
-`traderhub`, `self-scheduling`, and `file-delivery`, plus removal/reconciliation of legacy
-`alice-workspace` copies. `.agents/skills` is primary and `.claude/skills` is its
+Alice Harness owns complete trees for `alice`, `market-data`, `alice-analysis`,
+`smart-money-concepts`, `alice-uta`, `traderhub`, `self-scheduling`, and
+`file-delivery`, plus removal/reconciliation of legacy `alice-workspace` copies.
+`smart-money-concepts` is a thin bridge to the MIT `smartmoneyconcepts` PyPI
+package (installed at use time, never vendored); it reads K-lines through
+`alice market bars` and is analysis-only. `.agents/skills` is primary and `.claude/skills` is its
 runtime mirror; old `.pi/skills` duplicates are included only for reconciliation.
 Template-declared instructions, README and other bundled Skills remain template
 owned. Existing template baselines may contain these trees, but template plans

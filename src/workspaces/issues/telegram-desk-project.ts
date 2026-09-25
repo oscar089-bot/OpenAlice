@@ -1,6 +1,4 @@
-import { createHash } from 'node:crypto'
-
-import { ConnectorClient, OWNER_CHAT_TEXT_MAX } from '@traderalice/connector-protocol'
+import { ConnectorClient, OWNER_CHAT_TEXT_MAX, type OwnerChatActivity, type OwnerChatTool } from '@traderalice/connector-protocol'
 
 import { resolveConnectorUrl } from '../../services/connector-client/index.js'
 import type {
@@ -19,35 +17,67 @@ export function normalizeDeskText(text: string): string {
   return text.trim().slice(0, OWNER_CHAT_TEXT_MAX)
 }
 
-/**
- * Texts that are safe to ship before the turn finishes.
+/** Tail length of the tool list sent with each activity update.
  *
- * A text block is sealed only when a tool or error follows it. Consecutive
- * text blocks are treated as one growing narration: only the last one before
- * the non-text block is sent, so streamed chunks do not each become a DM.
- * The trailing text stays with today's final comment / `assistantText`.
+ * Bounded because this rides every progress publish: the newest entries are
+ * what a watcher reads, and an unbounded list would grow the message until the
+ * transport truncated it from the bottom — cutting off the current tool. */
+const MAX_ACTIVITY_TOOLS = 8
+
+/**
+ * Project a compact turn snapshot onto the wire activity shape.
+ *
+ * Only the tool NAME and a narration excerpt cross the boundary. Tool inputs and
+ * outputs are dropped here rather than downstream: they are noisy and can carry
+ * absolute paths, so the decision belongs at the projection edge.
+ *
+ * `currentTool` is the LAST tool still `running`. A turn can have several tools
+ * in flight (parallel calls), and the most recently started one is the honest
+ * answer to "what is it doing right now".
+ *
+ * `recentTools` carries the tail of the tool list WITH status. This is the part
+ * that makes the readout truthful: a Read or a Grep finishes in well under
+ * Alice's 1s progress debounce, so by the time a snapshot is published there is
+ * often no `running` tool at all and the fast calls are invisible. Keeping the
+ * tail (rather than only the in-flight one) is what shows that six tools ran and
+ * that one of them failed.
  */
-export function sealedProgressTexts(
+export function turnActivityFrom(
   progress: HeadlessTurnProgress,
-  _metadata?: HeadlessTaskTriggerMetadata,
-): string[] {
-  const sealed: string[] = []
-  const { blocks } = progress
-  for (let i = 0; i < blocks.length; i++) {
-    const block = blocks[i]
-    if (block?.type !== 'text') continue
-    const next = blocks[i + 1]
-    if (!next || next.type === 'text') continue
-    const text = normalizeDeskText(block.text)
-    if (!text) continue
-    sealed.push(text)
+): OwnerChatActivity | undefined {
+  const { metrics, blocks } = progress
+  // No tools ⇒ nothing to add. The accepted phase already seeded the slot with
+  // `Thinking`, so a text-only update would re-send the same render and buy
+  // nothing. Narration deliberately does NOT ride this wire: the slot is
+  // overwritten every tick, so prose put here vanished mid-sentence.
+  if (metrics.toolCalls <= 0) return undefined
+  let currentTool: string | undefined
+  const tools: OwnerChatTool[] = []
+  for (const block of blocks) {
+    if (block.type !== 'tool') continue
+    if (block.status === 'running') currentTool = block.name
+    tools.push({
+      name: block.name,
+      status: block.status,
+      ...(typeof block.durationMs === 'number' ? { durationMs: block.durationMs } : {}),
+      ...(block.error ? { error: block.error } : {}),
+    })
   }
-  return sealed
+  return {
+    toolCalls: metrics.toolCalls,
+    toolFailures: metrics.toolFailures,
+    ...(currentTool ? { currentTool } : {}),
+    ...(tools.length > 0 ? { recentTools: tools.slice(-MAX_ACTIVITY_TOOLS) } : {}),
+  }
 }
 
-export function deskProgressMessageId(scopeId: string, text: string): string {
-  const digest = createHash('sha256').update(text).digest('base64url').slice(0, 12)
-  return `desk-progress-${scopeId}-${digest}`
+/** Stable id for a turn's single ephemeral activity slot.
+ *
+ * One id per TASK, not per text: the transport edits this one slot in place
+ * while the turn runs, then drops it when the real reply lands. A text-derived
+ * id would make every narration chunk its own permanent message. */
+export function deskProgressMessageId(scopeId: string): string {
+  return `desk-progress-${scopeId}`
 }
 
 export function deskProgressScope(task: {

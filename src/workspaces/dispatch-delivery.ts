@@ -1,16 +1,22 @@
-import { ConnectorClient, OWNER_CHAT_TEXT_MAX, type OwnerChatMessage } from '@traderalice/connector-protocol'
+import { ConnectorClient, OWNER_CHAT_TEXT_MAX, type OwnerChatActivity, type OwnerChatMessage } from '@traderalice/connector-protocol'
 import { resolveConnectorUrl } from '../services/connector-client/index.js'
 import type { HeadlessTaskRecord, HeadlessTaskRegistry } from './headless-task-registry.js'
 import type { HeadlessTurnProgress } from './headless-progress.js'
-import { deskProgressMessageId, sealedProgressTexts } from './issues/telegram-desk-project.js'
+import { deskProgressMessageId, turnActivityFrom } from './issues/telegram-desk-project.js'
 
-export function dispatchMessage(task: HeadlessTaskRecord, phase: OwnerChatMessage['phase'], text?: string): OwnerChatMessage | null {
+export function dispatchMessage(
+  task: HeadlessTaskRecord,
+  phase: OwnerChatMessage['phase'],
+  text?: string,
+  activity?: OwnerChatActivity,
+): OwnerChatMessage | null {
   const delivery = task.communication?.delivery
   if (!delivery) return null
   return {
     id: `turn-${task.taskId}-${phase}`, adapterId: delivery.connectorId, conversationId: task.taskId, phase,
     workspaceId: delivery.contentWorkspaceId, source: delivery.source,
     ...(text?.trim() ? { text: text.trim().slice(0, OWNER_CHAT_TEXT_MAX) } : {}),
+    ...(activity ? { activity } : {}),
     ...(phase === 'accepted' || phase === 'progress' ? { activityLeaseMs: 60_000 } : {}),
   }
 }
@@ -42,17 +48,33 @@ export class DispatchDelivery {
     }
   }
 
+  /**
+   * Push live turn activity into the transport's ONE ephemeral slot.
+   *
+   * Every update reuses a single stable message id, because the whole point of
+   * the slot is that it is EDITED rather than appended to. Emitting one message
+   * per sealed narration chunk (the previous behaviour) left the chat littered
+   * with durable fragments that were never cleaned up when the real reply
+   * arrived.
+   *
+   * The transport owns the animation from here: Alice's progress publisher is
+   * debounced at 1s, so a transport that only displayed this string verbatim
+   * would appear frozen during a long tool call.
+   */
   async offer(task: HeadlessTaskRecord, snapshot: HeadlessTurnProgress): Promise<void> {
     if (task.status !== 'running' || task.terminalDelivery || !task.communication?.delivery) return
+    const activity = turnActivityFrom(snapshot)
+    if (!activity) return
+    const fingerprint = JSON.stringify(activity)
+    if (this.progress.get(task.taskId)?.has(fingerprint)) return
     const seen = this.progress.get(task.taskId) ?? new Set<string>()
+    seen.clear()
+    seen.add(fingerprint)
     this.progress.set(task.taskId, seen)
-    for (const text of sealedProgressTexts(snapshot)) {
-      if (seen.has(text)) continue
-      const message = dispatchMessage(task, 'progress', text)!
-      message.id = deskProgressMessageId(task.taskId, text)
-      try { await this.send(message); seen.add(text) } catch (error) {
-        this.warn('dispatch.delivery_progress_failed', { taskId: task.taskId, error: String(error) })
-      }
+    const message = dispatchMessage(task, 'progress', undefined, activity)!
+    message.id = deskProgressMessageId(task.taskId)
+    try { await this.send(message) } catch (error) {
+      this.warn('dispatch.delivery_progress_failed', { taskId: task.taskId, error: String(error) })
     }
   }
 
