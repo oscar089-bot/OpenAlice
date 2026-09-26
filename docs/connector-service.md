@@ -73,6 +73,15 @@ categories.
   `text` blocks (a tool or error followed them). If live drafts are unavailable,
   Telegram refreshes the ordinary typing action every four seconds. Typing also
   continues alongside text drafts during tool calls, until the terminal event.
+  While a turn runs, the draft mirrors the desktop UI's COLLAPSED activity
+  group: one header (`⣾ **Working** · 19 actions · 1 failed`), the distinct tool
+  names as a blockquote meta, and a line ONLY for a failure, which carries its
+  reason. Successful and in-flight calls are counted, never enumerated, so a
+  many-tool turn stays two or three lines instead of one line per tool. Before
+  any tool runs the slot is only the spinner. The rich card needs Bot API 10.1
+  rich-draft rendering; when that is rejected the same information is sent as
+  plain text with the markdown syntax stripped, because `sendMessageDraft` does
+  no parsing and would otherwise show literal backticks.
   In-turn CLI comments update the same draft rather than marking it final. A
   suppressed automated reply sends a textless final event to stop activity
   without publishing a message. Final and

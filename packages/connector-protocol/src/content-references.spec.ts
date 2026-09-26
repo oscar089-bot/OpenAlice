@@ -8,8 +8,20 @@ describe('shared content references', () => {
     expect(references.map(ref => body.slice(ref.start, ref.end))).toEqual(['[[reports/Case.PDF]]', '[[images/photo.png]]', '[[reports/Case.PDF]]'])
     expect(inboxFiles({ body, fileRevisions: { 'reports/Case.PDF': 'sha256:abc' } })).toEqual([{ path: 'reports/Case.PDF', revision: 'sha256:abc' }, { path: 'images/photo.png' }])
   })
-  it('ignores literal code, escapes, entity links and paths escaping the Workspace', () => {
-    const body = '`[[inline.md]]`\n```md\n[[fenced.md]]\n```\n\\[[escaped.md]] [[NVDA]] [[../private.md]] [[/absolute.pdf]] [[https://example.com/a.pdf]] [[./README]]'
+  it('recovers a real reference the model wrapped in an inline code span', () => {
+    // The reported bug: a backticked `[[path]]` stayed literal, so the operator
+    // saw `[[reports/chart.png]]` instead of the image. A span that is EXACTLY
+    // one valid reference is now recovered.
+    const body = 'Here it is: `[[reports/chart.png]]`'
+    expect(parseContentReferences(body).references.map(ref => body.slice(ref.start, ref.end)))
+      .toEqual(['`[[reports/chart.png]]`'])
+    expect(inboxFiles({ body })).toEqual([{ path: 'reports/chart.png' }])
+  })
+
+  it('ignores code that is not a reference, plus escapes, entities and escaping paths', () => {
+    // A bare placeholder, a FENCED example, an escape, an entity link, and a
+    // path leaving the Workspace are all discussion, not attachments.
+    const body = '`[[path]]`\n```md\n[[fenced.md]]\n```\n\\[[escaped.md]] [[NVDA]] [[../private.md]] [[/absolute.pdf]] [[https://example.com/a.pdf]] [[./README]]'
     expect(inboxFiles({ body })).toEqual([{ path: './README' }])
   })
   it('does not turn Inbox no-reply into content removal', () => {
@@ -27,5 +39,14 @@ it('parses market identities at the last slash without indexing them as files', 
     expect(parseMarketReference(invalid)).toBeNull()
     expect(parseContentReferences(`[[${invalid}]]`).references).toEqual([])
   }
-  expect(parseContentReferences('`[[market/a|b/1d]]`').references).toEqual([])
+  // A backticked market identity is still a real chart request.
+  expect(parseContentReferences('`[[market/a|b/1d]]`').references.map(ref => ref.path)).toEqual(['market/a|b/1d'])
+
+  // The exact identity from the report, in both spellings. A market reference
+  // contains `|` and `/`, so it fails `isFileReference` and must be recognised
+  // as a chart request by `parseMarketReference` instead.
+  for (const body of ['[[market/yfinance|SOLUSD/1d]]', '`[[market/yfinance|SOLUSD/1d]]`']) {
+    expect(parseContentReferences(body).references.map(ref => ref.path))
+      .toEqual(['market/yfinance|SOLUSD/1d'])
+  }
 })

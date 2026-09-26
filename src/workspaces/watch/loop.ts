@@ -95,7 +95,12 @@ export interface WatchLoopDeps {
   maxFetchesPerTick?: number
 }
 
-/** Stable fingerprint of the authored spec. Changing it re-arms the watcher. */
+/** Stable fingerprint of the authored spec. Changing it re-arms the watcher.
+ *
+ * `spec.meta` is deliberately EXCLUDED. Meta is presentation only, and a model
+ * that updates a grade or phase after the fact must not reset fired-condition
+ * history — that would clear the anti-spam guard and replay an alert for a
+ * condition the operator already saw. */
 export function specFingerprint(spec: WatchSpec): string {
   return JSON.stringify({
     pair: spec.pair,

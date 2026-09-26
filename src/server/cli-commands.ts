@@ -24,6 +24,7 @@ const BASE_EXPORTS: Record<string, CliExport> = {
     description: 'Market & research data sources',
     groupDescriptions: {
       rss: 'Search and read the user\'s collected subscribed-feed archive',
+      web: 'Search the open web and read a page as Markdown',
       market: 'Discover symbols, bar sources, and optional market-data vendors',
       analysis: 'Read dated K-lines and calculate indicators',
     },
@@ -38,6 +39,13 @@ const BASE_EXPORTS: Record<string, CliExport> = {
         // window: date-bounded, oldest-first — for aligning catalysts to a price path.
         window: 'windowRss',
         read: 'readRss',
+      },
+      // `web`, not `news`: OPEN-WEB search (multi-backend Python `ddgs`) +
+      // page read (Jina Reader). Different surface from `rss` (the subscribed
+      // feed archive) — the two are complementary, not aliases.
+      web: {
+        search: 'webSearch',
+        read: 'readUrl',
       },
       market: {
         search: 'marketSearchForResearch',

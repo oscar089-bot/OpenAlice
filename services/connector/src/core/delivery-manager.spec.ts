@@ -1,4 +1,7 @@
 import { createHash } from 'node:crypto'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import type {
   ConnectorAdapterConfig,
@@ -509,6 +512,152 @@ describe('DeliveryManager connector registry', () => {
     expect(alpha.deliver).not.toHaveBeenCalled()
     await manager.stop()
   })
+
+describe('DeliveryManager retry of transient failures', () => {
+  it('re-delivers a notification that failed while the transport was not ready', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'delivery-retry-'))
+    const path = join(dir, 'pending.json')
+    const delivered: InboxNotification[] = []
+    let ready = false
+    const registry = new ConnectorRegistry()
+    registry.register({
+      definition: { id: 'telegram', label: 'Telegram', description: 'Telegram.', fields: [], commands: [] },
+      create: () => ({
+        id: 'telegram',
+        start: async () => undefined,
+        stop: async () => undefined,
+        // The restart case: the send is refused until the session is up.
+        deliver: async (notification) => {
+          if (!ready) throw new Error('Telegram bot is not ready')
+          delivered.push(notification)
+        },
+        sendOwnerText: async () => undefined,
+        health: () => ({ id: 'telegram', enabled: true, status: 'healthy' as const }),
+      }),
+    })
+    const manager = new DeliveryManager({
+      registry,
+      config: { version: 1, adapters: { telegram: { enabled: true, settings: {} } } },
+      updateAdapterSettings: vi.fn(),
+      pendingDeliveryPath: path,
+    })
+    try {
+      await manager.start()
+      const notification: InboxNotification = {
+        id: 'alert-1',
+        createdAt: new Date().toISOString(),
+        workspaceId: 'ws-1',
+        title: 'Inbox update from chat',
+        body: '**Watcher fired** — BTC reclaim watch',
+        deliverTo: ['telegram'],
+      }
+      // A retryable refusal is ACCEPTED, not rethrown: the service now owns it.
+      await expect(manager.deliver(notification)).resolves.toBeUndefined()
+      expect(delivered).toHaveLength(0)
+
+      // Transport comes up, and the queued alert lands on a later tick.
+      ready = true
+      await manager.retryPending(Date.now() + 60_000)
+      expect(delivered).toHaveLength(1)
+      expect(delivered[0]?.id).toBe('alert-1')
+      // Drained, so a further tick does not send it twice.
+      await manager.retryPending(Date.now() + 120_000)
+      expect(delivered).toHaveLength(1)
+    } finally {
+      await manager.stop()
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('does not retry a permanent failure', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'delivery-retry-'))
+    const path = join(dir, 'pending.json')
+    const registry = new ConnectorRegistry()
+    const deliver = vi.fn(async () => { throw new Error('malformed payload rejected') })
+    registry.register({
+      definition: { id: 'telegram', label: 'Telegram', description: 'Telegram.', fields: [], commands: [] },
+      create: () => ({
+        id: 'telegram',
+        start: async () => undefined,
+        stop: async () => undefined,
+        deliver,
+        sendOwnerText: async () => undefined,
+        health: () => ({ id: 'telegram', enabled: true, status: 'healthy' as const }),
+      }),
+    })
+    const manager = new DeliveryManager({
+      registry,
+      config: { version: 1, adapters: { telegram: { enabled: true, settings: {} } } },
+      updateAdapterSettings: vi.fn(),
+      pendingDeliveryPath: path,
+    })
+    try {
+      await manager.start()
+      // `deliver` settles through `allSettled`, so a failure never reaches the
+      // caller — it is visible in the IO journal. What matters here is that a
+      // PERMANENT error is not queued: replaying it would be pure noise.
+      await manager.deliver({
+        id: 'bad-1', createdAt: new Date().toISOString(), workspaceId: 'ws-1', title: 't', body: 'b',
+        deliverTo: ['telegram'],
+      })
+      expect(deliver).toHaveBeenCalledTimes(1)
+      await manager.retryPending(Date.now() + 60_000)
+      expect(deliver).toHaveBeenCalledTimes(1)
+    } finally {
+      await manager.stop()
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('survives a restart: a queued alert is delivered by the next process', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'delivery-restart-'))
+    const path = join(dir, 'pending.json')
+    const make = (ready: boolean, sink: InboxNotification[]) => {
+      const registry = new ConnectorRegistry()
+      registry.register({
+        definition: { id: 'telegram', label: 'Telegram', description: 'Telegram.', fields: [], commands: [] },
+        create: () => ({
+          id: 'telegram',
+          start: async () => undefined,
+          stop: async () => undefined,
+          deliver: async (notification: InboxNotification) => {
+            if (!ready) throw new Error('Telegram bot is not ready')
+            sink.push(notification)
+          },
+          sendOwnerText: async () => undefined,
+          health: () => ({ id: 'telegram', enabled: true, status: 'healthy' as const }),
+        }),
+      })
+      return new DeliveryManager({
+        registry,
+        config: { version: 1, adapters: { telegram: { enabled: true, settings: {} } } },
+        updateAdapterSettings: vi.fn(),
+        pendingDeliveryPath: path,
+      })
+    }
+    const sink: InboxNotification[] = []
+    const before = make(false, [])
+    const after = make(true, sink)
+    try {
+      await before.start()
+      await before.deliver({
+        id: 'alert-restart', createdAt: new Date().toISOString(), workspaceId: 'ws-1',
+        title: 't', body: 'b', deliverTo: ['telegram'],
+      })
+      await before.stop()
+      // The next process adopts the queue and delivers it, which is the whole
+      // point: a trigger that fired during the restart window still reaches the
+      // operator instead of vanishing.
+      await after.start()
+      await after.retryPending(Date.now() + 60_000)
+      expect(sink.map((item) => item.id)).toEqual(['alert-restart'])
+    } finally {
+      await before.stop()
+      await after.stop()
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
 
   it('keeps the historical fan-out when no allow-list is present', async () => {    const create = (id: string) => {
       const deliver = vi.fn(async () => undefined)
@@ -1051,6 +1200,29 @@ it('shares terminal ordering and renewable activity leases across adapters', asy
     await vi.advanceTimersByTimeAsync(2000)
     expect(adapter.stopOwnerActivity).toHaveBeenCalledTimes(2)
   } finally { await manager.stop(); vi.useRealTimers() }
+})
+
+// A live turn reuses ONE message id and `phase: 'progress'` so the transport
+// edits a single ephemeral slot in place. Deduping those on id+phase alone
+// registered the key on frame one and dropped every later frame, which froze
+// the Telegram card on its opening `read` while bash commands kept running.
+it('delivers every distinct progress frame that reuses one activity id', async () => {
+  const adapter = new FakeThirdPartyAdapter() as FakeThirdPartyAdapter & {
+    sendOwnerChat: ReturnType<typeof vi.fn>
+  }
+  adapter.sendOwnerChat = vi.fn(async () => undefined)
+  const registry = new ConnectorRegistry()
+  registry.register({ definition: { id: adapter.id, label: 'Test', description: '', fields: [], commands: [] }, create: () => adapter })
+  const manager = new DeliveryManager({ registry, config: { version: 1, adapters: { [adapter.id]: { enabled: true, settings: {} } } }, updateAdapterSettings: vi.fn(), readWorkspaceFile: vi.fn() })
+  await manager.start()
+  try {
+    const base = { adapterId: adapter.id, conversationId: 'live', id: 'desk-progress-live', phase: 'progress' as const }
+    await manager.sendOwnerChat({ ...base, activity: { toolCalls: 1, toolFailures: 0, currentTool: 'read_file' } })
+    await manager.sendOwnerChat({ ...base, activity: { toolCalls: 2, toolFailures: 0, currentTool: 'Bash' } })
+    // An identical resend still collapses rather than re-editing the slot.
+    await manager.sendOwnerChat({ ...base, activity: { toolCalls: 2, toolFailures: 0, currentTool: 'Bash' } })
+    expect(adapter.sendOwnerChat).toHaveBeenCalledTimes(2)
+  } finally { await manager.stop() }
 })
 
 function boardSync() {

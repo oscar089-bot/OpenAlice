@@ -75,6 +75,8 @@ export function toBoardSpec(spec: WatchSpec): WatcherBoardSpec {
         ...(typeof spec.position.size === 'number' ? { size: spec.position.size } : {}),
       },
     } : {}),
+    ...(spec.meta?.waitingTrigger ? { waitingTrigger: spec.meta.waitingTrigger } : {}),
+    ...(spec.meta?.invalidationConditions ? { invalidationConditions: [...spec.meta.invalidationConditions] } : {}),
     ...(spec.expiry ? { expiry: spec.expiry } : {}),
   }
 }
@@ -120,12 +122,19 @@ export function toBoardItem(input: {
       backoffUntil: state.backoffUntil,
       firedConditions: { ...state.firedConditions },
     },
-    // Stop/targets come from the frozen position the watcher evaluates against,
-    // so the card cannot disagree with the rule that will actually fire.
-    ...(spec.position ? {
+    // Board presentation comes from two places: the frozen position the
+    // evaluator compares against (so the card cannot disagree with the rule
+    // that will actually fire), and the plan context the model authored. The
+    // authored meta is what makes a grade or phase visible; without it the card
+    // fell back to `not graded` and the model's analysis was invisible.
+    ...(spec.meta || spec.position ? {
       meta: {
-        ...(typeof spec.position.stop === 'number' ? { stopLoss: spec.position.stop } : {}),
-        ...(spec.position.targets ? { targets: [...spec.position.targets] } : {}),
+        ...(spec.meta?.grade ? { grade: spec.meta.grade } : {}),
+        ...(spec.meta?.rating !== undefined ? { rating: spec.meta.rating } : {}),
+        ...(spec.meta?.phase ? { setupPhase: spec.meta.phase } : {}),
+        ...(spec.meta?.nextStep ? { nextStep: spec.meta.nextStep } : {}),
+        ...(typeof spec.position?.stop === 'number' ? { stopLoss: spec.position.stop } : {}),
+        ...(spec.position?.targets ? { targets: [...spec.position.targets] } : {}),
       },
     } : {}),
     nowIso,

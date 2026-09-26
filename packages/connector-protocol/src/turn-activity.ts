@@ -7,20 +7,15 @@
  * from the same structured input, and so the tool-name vocabulary is defined
  * once rather than re-guessed per adapter.
  *
- * Why a Unicode bar: a chat message has no layout primitives — no CSS, no
- * flexbox, no width. A run of `▰`/`▱` is the only way to draw a bar inside a
- * text message. On the desktop UI the same data is drawn with a real styled
- * element instead (see `IssueDetail.tsx`), which is why the bar is NOT reused
- * there.
+ * Why the shape is a header, a blockquote, and a list: a chat message has no
+ * layout primitives — no CSS, no flexbox, no width. The desktop UI draws this
+ * same activity as a COLLAPSED disclosure group (see `ConversationTranscript.tsx`,
+ * `ConversationActivityGroup`), and a Telegram draft is always collapsed. This
+ * renderer therefore mirrors that collapsed row — one header, the tool names as
+ * meta, and a line only for a failure — rather than the expanded tool list.
  */
 
 import type { OwnerChatActivity, OwnerChatTool } from './types.js'
-
-const BAR_WIDTH = 12
-/** Filled cell. A shade block reads as a gauge in a chat bubble, where the
- *  geometric `\u25B0` reads as a barcode and looks broken in some clients. */
-const FILLED = '\u2592'
-const EMPTY = '\u2591'
 
 /**
  * Map a raw tool name to a present-participle phrase.
@@ -91,41 +86,15 @@ export function describeToolActivity(name: string | undefined): string {
   return TOOL_PHRASES[key] ?? humanizeToolName(name)
 }
 
-/**
- * A bar that advances with the tick rather than the data.
- *
- * A tool call can run far longer than Alice's 1s progress debounce, so a bar
- * derived from reported progress would sit frozen and read as a hang. Tying it
- * to the transport's own frame keeps it visibly alive, which is its entire job.
- *
- * Bracketed so it reads as a discrete gauge rather than trailing text.
- */
-export function activityBar(frame: number, width: number = BAR_WIDTH): string {
-  const safeWidth = Math.max(1, Math.floor(width))
-  const lit = (Math.max(0, Math.floor(frame)) % safeWidth) + 1
-  return `[${FILLED.repeat(lit)}${EMPTY.repeat(Math.max(0, safeWidth - lit))}]`
-}
-
-/** `3 tools · 1 failed` — empty when the turn has not called anything yet. */
+/** `19 actions · 1 failed` — empty when the turn has not called anything yet. */
 export function describeToolCounts(activity: OwnerChatActivity): string {
   if (activity.toolCalls <= 0) return ''
-  const tools = `${activity.toolCalls} ${activity.toolCalls === 1 ? 'tool' : 'tools'}`
-  return activity.toolFailures > 0 ? `${tools} \u00B7 ${activity.toolFailures} failed` : tools
+  const calls = `${activity.toolCalls} ${activity.toolCalls === 1 ? 'action' : 'actions'}`
+  return activity.toolFailures > 0 ? `${calls} \u00B7 ${activity.toolFailures} failed` : calls
 }
 
-/**
- * A status marker per tool, so a failure is attributable.
- *
- * Emoji rather than bare glyphs because this line is read in a chat client
- * where color is unavailable, and the prompt line below already carries the
- * textual identity. `⏳` stays deliberately STATIC: the headline owns the
- * animation, so exactly one thing on screen moves.
- */
-const TOOL_STATUS_MARK: Record<OwnerChatTool['status'], string> = {
-  running: '\u23F3',
-  completed: '\u2705',
-  failed: '\u26A0\uFE0F',
-}
+/** The one status mark that earns a line. Successes are counted, not listed. */
+const FAILED_MARK = '\u26A0\uFE0F'
 
 /**
  * Braille spinner frames — the "the turn is alive right now" animation.
@@ -142,14 +111,13 @@ export function brailleSpinner(frame: number): string {
 }
 
 /**
- * The shell-prompt channel for a tool: `bash`, `read`, `write`, `grep`…
+ * The short display label for a tool in the header meta: `bash`, `read`, `grep`…
  *
- * A prompt line reads `alice@{bash}:~$ Running…`. The channel exists so a
- * watcher can tell a shell command from a file read at a glance — the two feel
- * completely different when you are waiting on them. Unknown tools fall back to
- * a lowercased first word rather than being hidden.
+ * The collapsed desktop group renders its meta as `bash · read · grep`, so a
+ * watcher can tell a shell command from a file read at a glance. Unknown tools
+ * fall back to a lowercased first word rather than being hidden.
  */
-const TOOL_CHANNELS: Record<string, string> = {
+const TOOL_LABELS: Record<string, string> = {
   bash: 'bash', shell: 'bash', run_in_terminal: 'bash', terminal: 'bash', command: 'bash',
   read: 'read', read_file: 'read', readfile: 'read', view: 'read',
   write: 'write', write_file: 'write', writefile: 'write', create_file: 'write',
@@ -161,12 +129,60 @@ const TOOL_CHANNELS: Record<string, string> = {
   manage_todo_list: 'plan', update_plan: 'plan',
 }
 
-export function toolChannel(name: string | undefined): string {
-  if (!name || !name.trim()) return 'alice'
+/** How many distinct tool labels the header meta shows. */
+const MAX_META_TOOLS = 3
+
+/** `read_file` → `read`. Empty for a blank name, so an unnamed tool is skipped. */
+export function toolLabel(name: string | undefined): string {
+  if (!name || !name.trim()) return ''
   const key = normalizeToolKey(name)
-  const mapped = TOOL_CHANNELS[key]
-  if (mapped) return mapped
-  return key.split('_')[0] || 'alice'
+  return TOOL_LABELS[key] ?? key.split('_')[0] ?? ''
+}
+
+/**
+ * The unique tool labels for a turn, in first-seen order, capped.
+ *
+ * Mirrors the desktop group's `bash · read · grep` meta. A 19-action turn that
+ * used six distinct tools must not grow the header without bound, so the tail
+ * is elided rather than wrapped.
+ */
+export function describeToolMeta(tools: readonly OwnerChatTool[] | undefined): string {
+  if (!tools || tools.length === 0) return ''
+  const labels: string[] = []
+  for (const tool of tools) {
+    const label = toolLabel(tool.name)
+    if (label && !labels.includes(label)) labels.push(label)
+  }
+  return joinToolLabels(labels)
+}
+
+/**
+ * The header meta for a live activity payload.
+ *
+ * `recentTools` is the tail of the turn and normally carries the running tool,
+ * but a minimal update may report only `currentTool`. Naming the in-flight tool
+ * is the whole reason the meta exists, so it is folded in when absent rather
+ * than leaving the header without it.
+ */
+export function activityToolMeta(activity: OwnerChatActivity): string {
+  const recent = activity.recentTools ?? []
+  const current = activity.currentTool
+  const alreadyNamed = current !== undefined
+    && recent.some((tool) => toolLabel(tool.name) === toolLabel(current))
+  const tools = current && !alreadyNamed
+    ? [...recent, { name: current, status: 'running' as const }]
+    : recent
+  return describeToolMeta(tools)
+}
+
+function joinToolLabels(labels: readonly string[]): string {
+  if (labels.length === 0) return ''
+  // The MOST RECENT tools, not the first. `recentTools` is already the tail of
+  // the turn, so a 19-action turn should show what it is doing now rather than
+  // the read it opened with. Older labels are elided, not the new ones.
+  const shown = labels.slice(-MAX_META_TOOLS)
+  const meta = shown.map((label) => `\`${label}\``).join(' ')
+  return labels.length > MAX_META_TOOLS ? `\u2026 ${meta}` : meta
 }
 
 /** `420ms` → `0.4s`; `65000ms` → `1m 5s`. Absent when never measured. */
@@ -184,69 +200,87 @@ export function formatToolDuration(durationMs: number | undefined): string {
 }
 
 /**
- * One line per recent tool, oldest first.
+ * One line per FAILED tool, oldest first. Successes are counted, never listed.
  *
- * - `✅ Reading a file (0.4s)` — what it did, and how long it took
- * - `⚠️ Running a command: exit code 1` — what failed, and why
- * - `⣾ Writing a file` — in flight, so no duration yet
+ * - `⚠️ Running a command (1.2s): exit code 1` — what failed, and why
  *
- * A RUNNING row carries the spinner rather than a static mark. This is the row
- * a watcher stares at while a long command blocks the turn, and a frozen `⏳`
- * there is indistinguishable from a hung process. The description is kept on
- * every row rather than a bare `Done`: the earlier "count only" form could not
- * answer *which* tool ran, which was the whole reason this readout exists.
+ * The desktop group also force-expands on failure (`setOpen(failedCount > 0)`),
+ * because a failure is the one outcome a watcher must be able to act on. A
+ * successful call changes nothing the reader would do next, so enumerating it
+ * only grows a 19-tool turn into a wall of lines the draft has no room for.
+ * A running tool is named in the header meta instead of getting its own row.
  */
-export function renderRecentTools(tools: readonly OwnerChatTool[] | undefined, frame = 0): string {
+export function renderFailedTools(tools: readonly OwnerChatTool[] | undefined): string {
   if (!tools || tools.length === 0) return ''
   return tools
+    .filter((tool) => tool.status === 'failed')
     .map((tool) => {
-      const mark = tool.status === 'running' ? brailleSpinner(frame) : TOOL_STATUS_MARK[tool.status]
       const label = describeToolActivity(tool.name) || tool.name
-      const duration = tool.status === 'running' ? '' : formatToolDuration(tool.durationMs)
+      const duration = formatToolDuration(tool.durationMs)
       const timing = duration ? ` (${duration})` : ''
-      const reason = tool.status === 'failed' && tool.error ? `: ${tool.error}` : ''
-      return `${mark} ${label}${timing}${reason}`
+      const reason = tool.error ? `: ${tool.error}` : ''
+      return `${FAILED_MARK} ${label}${timing}${reason}`
     })
     .join('\n')
 }
 
 /**
- * The whole ephemeral line: the live headline plus the tool tail.
+ * The live header: status, action count, failures, and the tool-name meta.
+ *
+ * Mirrors the desktop collapsed group's single row — `19 actions` as the title
+ * and `bash · read · grep` as the meta — so both surfaces agree on what a
+ * running turn looks like. Exactly two shapes, because there are exactly two
+ * states worth distinguishing:
+ *   `⣾ 🧠 Thinking…`                        — no tool has run yet
+ *   `⣾ Working · 19 actions · bash read grep` — work is under way
+ */
+function renderHeader(activity: OwnerChatActivity, frame: number, meta: string, emphasize = false): string {
+  const spinner = brailleSpinner(frame)
+  const counts = describeToolCounts(activity)
+  if (!counts) return `${spinner} \uD83E\uDDE0 Thinking\u2026`
+  const status = emphasize ? '**Working**' : 'Working'
+  return meta ? `${spinner} ${status} \u00B7 ${counts} \u00B7 ${meta}` : `${spinner} ${status} \u00B7 ${counts}`
+}
+
+/**
+ * The whole ephemeral line as PLAIN text.
  *
  * Activity only — no model prose. Narration belongs in the real reply, where it
  * is durable and in order. Mixing it into a slot that is overwritten on every
  * tick produced fragments that vanished mid-sentence.
  *
- * The headline has exactly two shapes, because there are exactly two states
- * worth distinguishing:
- *   `⣾ 🧠 Thinking…`              — no tool has run yet
- *   `⣾ alice@{bash}:~$ Running…`  — a tool is in flight
- * The spinner leads both so "alive" is one glance, and the prompt names WHAT is
- * running where a developer's eye already expects to find it.
+ * No markdown syntax at all: this variant is what `sendMessageDraft` falls back
+ * to when rich drafts are unavailable, and a fallback that leaks literal
+ * backticks and `>` markers reads worse than no formatting.
  */
 export function renderTurnActivity(
   activity: OwnerChatActivity,
   frame: number,
 ): string {
-  const spinner = brailleSpinner(frame)
-  const counts = describeToolCounts(activity)
-  // Two headline shapes only. Once a tool finishes the model is reasoning about
-  // its result, which is honestly "thinking" again — and the tool log below
-  // still shows that work happened, so a third "Working" state would be a
-  // distinction the reader cannot act on.
-  const headline = activity.currentTool
-    ? `${spinner} \`alice@{${toolChannel(activity.currentTool)}}:~$\` Running\u2026`
-    : `${spinner} \uD83E\uDDE0 Thinking\u2026`
-  const lines = [headline]
-  // Nothing but the spinner until a tool actually runs.
-  //
-  // The counts line and the tool log are BOTH absent on a turn that has not
-  // called a tool yet, so the slot reads as plain `Thinking` exactly like the
-  // Discord surface did — no bar, no counters, no empty "Recent activity"
-  // scaffolding. They appear the moment real work starts and stay for the rest
-  // of the turn, which is what makes them worth reading.
-  if (counts) lines.push(`\`${activityBar(frame)}\` ${counts}`)
-  const tools = renderRecentTools(activity.recentTools, frame)
-  if (tools) lines.push(tools)
+  const meta = activityToolMeta(activity).replace(/`/g, '')
+  const lines = [renderHeader(activity, frame, meta)]
+  const failures = renderFailedTools(activity.recentTools)
+  if (failures) lines.push(failures)
+  return lines.join('\n')
+}
+
+/**
+ * The whole ephemeral line as a RICH card.
+ *
+ * Same information as the plain variant, but the tool-name meta moves into a
+ * blockquote so the header stays one scannable line instead of trailing into an
+ * unbounded list of names. That quote block is the closest a chat message gets
+ * to the desktop group's separate meta column, and it is why this variant needs
+ * Bot API 10.1 rich-message rendering rather than plain text.
+ */
+export function renderTurnActivityRich(
+  activity: OwnerChatActivity,
+  frame: number,
+): string {
+  const meta = activityToolMeta(activity)
+  const lines = [renderHeader(activity, frame, '', true)]
+  if (meta) lines.push('', `> ${meta}`)
+  const failures = renderFailedTools(activity.recentTools)
+  if (failures) lines.push('', failures)
   return lines.join('\n')
 }

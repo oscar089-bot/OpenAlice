@@ -344,6 +344,39 @@ for the next phase; otherwise mark it done.
   clock fires the schedule, the market fires the watch.
 - Add **`expiry: 2026-10-01T00:00:00Z`** to stop watching after a date.
 
+### Presentation (`meta`) — what the watcher board shows
+
+The deterministic rules decide *when* to wake you. The optional `meta` block is
+what the **watcher board card** displays to the operator — your grade, the phase
+name, and the next step. It is presentation only: the evaluator never reads it,
+and changing it does **not** re-arm the watcher or replay an alert.
+
+```yaml
+watch:
+  pair: BTC-USDT
+  timeframe: 1h
+  rules:
+    - { type: candle_close, timeframe: 1h, side: above, level: 110000 }
+  meta:
+    grade: A+                 # setup quality shown on the card
+    phase: reclaim             # which phase this watcher is watching
+    nextStep: Re-check volume and the 4h structure before re-arming.
+    waitingTrigger: BTC closes a 1h candle above 110k
+    invalidationConditions:
+      - BTC loses 98k on a 1h close
+      - Funding flips negative for 3 consecutive periods
+```
+
+- `grade` / `rating` — setup quality. Without it the card reads `not graded`.
+- `phase` — the plan phase (e.g. `reclaim`, `retest`, `phase 2`).
+- `nextStep` — what the woken Session should do; shown as *Next after alert*.
+- `waitingTrigger` — a plain-English trigger sentence, so the card reads
+  without decoding the rule table.
+- `invalidationConditions` — prose invalidation, shown alongside the rules.
+
+Always set `grade` and `phase` when you arm a watcher. Leaving them out is why
+the board looks empty even though the rules are working.
+
 ### Rule types
 
 Every rule is `{ type, ... }`. Level rules need a numeric `level`; zone rules

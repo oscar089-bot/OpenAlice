@@ -25,8 +25,11 @@ accepted and available revisions separately.
 ## Ownership
 
 Alice Harness owns complete trees for `alice`, `market-data`, `alice-analysis`,
-`smart-money-concepts`, `alice-uta`, `traderhub`, `self-scheduling`, and
-`file-delivery`, plus removal/reconciliation of legacy `alice-workspace` copies.
+`smart-money-concepts`, `alice-uta`, `traderhub`, `self-scheduling`,
+`file-delivery`, and `smcpro`, plus removal/reconciliation of legacy
+`alice-workspace` copies. `smcpro` is the SMC + price-action live analysis
+protocol; it is analysis-only and delegates all market reads to `market-data` and
+the `smart-money-concepts` bridge.
 `smart-money-concepts` is a thin bridge to the MIT `smartmoneyconcepts` PyPI
 package (installed at use time, never vendored); it reads K-lines through
 `alice market bars` and is analysis-only. `.agents/skills` is primary and `.claude/skills` is its

@@ -370,11 +370,11 @@ describe('Telegram rich outbound text', () => {
           | undefined
         return call?.[2]?.markdown ?? ''
       }
-      // The headline names the channel in a shell prompt, so a watcher can tell
-      // a shell command from a file read at a glance.
-      expect(latest()).toContain('alice@{read}:~$')
-      expect(latest()).toContain('Running\u2026')
-      expect(latest()).toContain('1 tool')
+      // The header carries the live status, the action count, and the tool-name
+      // meta, so a watcher sees what kind of work is running at a glance.
+      expect(latest()).toContain('**Working**')
+      expect(latest()).toContain('1 action')
+      expect(latest()).toContain('`read`')
 
       // The spinner advances on the adapter's own tick rather than on Alice's
       // 1s-debounced payload, so one long tool call still reads as alive.
@@ -382,7 +382,7 @@ describe('Telegram rich outbound text', () => {
       const beforeTick = latest()
       await vi.advanceTimersByTimeAsync(1_300)
       expect(latest()).not.toBe(beforeTick)
-      expect(latest()).toContain('alice@{read}:~$')
+      expect(latest()).toContain('**Working**')
 
       // The final reply ends the ephemeral slot: nothing is left behind above it.
       await adapter.sendOwnerChat({
@@ -400,10 +400,9 @@ describe('Telegram rich outbound text', () => {
     }
   })
 
-  // The tool log is the reason this readout exists: a bare count cannot say
-  // WHICH tool ran. Several calls must all appear, in order, each with its own
-  // outcome — the old readout showed one and looked stuck.
-  it('lists every tool call the model ran, not just the current one', async () => {
+  // The readout collapses a many-tool turn: a bare count cannot say WHICH tool
+  // ran, so the header names them — but only a FAILURE earns its own line.
+  it('collapses many tool calls into a header and the failures', async () => {
     const adapter = new TelegramConnectorAdapter({ attemptTimeoutMs: 200, reconnectDelayMs: 20 })
     await startUntilReady(adapter, { botToken: 'token', ownerUserId: '42', chatId: '99' })
     vi.useFakeTimers()
@@ -428,13 +427,15 @@ describe('Telegram rich outbound text', () => {
           | undefined
         return call?.[2]?.markdown ?? ''
       }
-      // Headline names the in-flight tool, and the count is present.
-      expect(latest()).toContain('alice@{write}:~$')
-      expect(latest()).toContain('3 tools \u00B7 1 failed')
-      // All THREE calls are listed, including the two already finished.
-      expect(latest()).toContain('Reading a file')
+      // Header names every distinct tool, and the count is present.
+      expect(latest()).toContain('**Working**')
+      expect(latest()).toContain('3 actions \u00B7 1 failed')
+      expect(latest()).toContain('> `read` `bash` `write`')
+      // Only the failure gets its own row; the two successes are counted, not
+      // listed, which is what keeps a 19-tool turn to two lines.
       expect(latest()).toContain('Running a command')
-      expect(latest()).toContain('Writing a file')
+      expect(latest()).not.toContain('Reading a file')
+      expect(latest()).not.toContain('Writing a file')
       // The failure carries its reason, so "1 failed" is actionable.
       expect(latest()).toContain('exit code 1')
     } finally {
@@ -443,7 +444,7 @@ describe('Telegram rich outbound text', () => {
     }
   })
 
-  // Before any tool runs, the slot is only the spinner — no bar, no counters.
+  // Before any tool runs, the slot is only the spinner — no counters, no meta.
   it('shows only the thinking spinner before the first tool call', async () => {
     const adapter = new TelegramConnectorAdapter({ attemptTimeoutMs: 200, reconnectDelayMs: 20 })
     await startUntilReady(adapter, { botToken: 'token', ownerUserId: '42', chatId: '99' })

@@ -137,6 +137,31 @@ export const watchPositionSchema = z.object({
 
 export const watchAssetClassSchema = z.enum(['crypto', 'forex', 'equity', 'commodity', 'index'])
 
+/**
+ * Plan context the model authors ALONGSIDE the deterministic rules.
+ *
+ * These are presentation only — the evaluator never reads them. They live UNDER
+ * `watch:` rather than beside it so they re-arm with the phase they describe: a
+ * grade for a setup that no longer exists would be actively misleading.
+ *
+ * Deliberately excluded from `specFingerprint` (see loop.ts): changing a grade
+ * must NOT reset fired-condition history and replay an alert.
+ */
+export const watchMetaSchema = z.object({
+  /** Setup quality, e.g. `A+`. */
+  grade: z.string().min(1).max(32).optional(),
+  /** Numeric rating, when the model uses a scale instead of a letter. */
+  rating: z.union([z.string().max(32), z.number().finite()]).optional(),
+  /** Which phase of the plan this watcher is watching, e.g. `reclaim`. */
+  phase: z.string().min(1).max(120).optional(),
+  /** What the woken Session should do after the alert. */
+  nextStep: z.string().min(1).max(500).optional(),
+  /** Human trigger sentence, so the card reads without the rule table. */
+  waitingTrigger: z.string().min(1).max(500).optional(),
+  /** Invalidation sentences, when written as prose rather than rules. */
+  invalidationConditions: z.array(z.string().min(1).max(500)).max(20).optional(),
+})
+
 /** The full `watch:` block. */
 export const watchSpecSchema = z.object({
   pair: z.string().min(1).max(64),
@@ -148,6 +173,8 @@ export const watchSpecSchema = z.object({
   managementRules: z.array(watchManagementRuleSchema).max(32).default([]),
   position: watchPositionSchema.optional(),
   expiry: z.string().min(1).optional(),
+  /** Presentation context shown on the watcher board card. */
+  meta: watchMetaSchema.optional(),
 }).superRefine((spec, ctx) => {
   if (spec.rules.length === 0 && spec.managementRules.length === 0) {
     ctx.addIssue({

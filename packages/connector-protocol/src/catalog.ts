@@ -116,6 +116,7 @@ export const TELEGRAM_CONNECTOR_DEFINITION: ConnectorDefinition = {
       { name: 'stop', description: 'Stop the Agent reply that is currently running.' },
       { name: 'uta', description: 'Review and approve pending trades.' },
       { name: 'watchers', description: 'Open the live watcher board.' },
+      { name: 'watcher', description: 'Alias for /watchers.' },
     ],
     capabilities: ['inbox', 'settings', 'uta', 'desk'],
     setupLinks: [

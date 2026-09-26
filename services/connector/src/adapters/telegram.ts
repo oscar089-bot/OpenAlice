@@ -14,7 +14,12 @@ import type {
   WatcherBoardItem,
   WatcherBoardSync,
 } from '@traderalice/connector-protocol'
-import { isInboxPushEnabled, renderTurnActivity, TELEGRAM_CONNECTOR_DEFINITION } from '@traderalice/connector-protocol'
+import {
+  isInboxPushEnabled,
+  renderTurnActivity,
+  renderTurnActivityRich,
+  TELEGRAM_CONNECTOR_DEFINITION,
+} from '@traderalice/connector-protocol'
 import { createInboxStore, type IInboxStore } from '@/core/inbox-store.js'
 import type {
   ConnectorAdapter,
@@ -643,8 +648,14 @@ export class TelegramConnectorAdapter implements ConnectorAdapter {
         await ctx.reply('Could not open the watcher board. Check OpenAlice logs.').catch(() => undefined)
       })
     })
-    bot.command('watchers', async (ctx) => {
+    // Alias. Operators type the singular constantly, and an unregistered command
+    // falls through to the owner-text handler as an ordinary message.
+    bot.command('watcher', async (ctx) => {
       if (ctx.chat.type !== 'private' || !ctx.from) return
+      if (!this.isOwner(String(ctx.from.id))) {
+        await ctx.reply('This command is only available to the linked owner.')
+        return
+      }
       await this.openBoard(ctx).catch(async (error) => {
         this.tracker.degraded(error)
         await ctx.reply('Could not open the watcher board. Check OpenAlice logs.').catch(() => undefined)
@@ -658,7 +669,7 @@ export class TelegramConnectorAdapter implements ConnectorAdapter {
     })
 
     for (const command of TELEGRAM_CONNECTOR_DEFINITION.commands) {
-      if (command.name === 'model' || command.name === 'inbox' || command.name === 'settings' || command.name === 'uta' || command.name === 'watchers') continue
+      if (command.name === 'model' || command.name === 'inbox' || command.name === 'settings' || command.name === 'uta' || command.name === 'watchers' || command.name === 'watcher') continue
       bot.command(command.name, async (ctx) => {
         if (ctx.chat.type !== 'private' || !ctx.from) return
         const handled = await context.commands.execute({
@@ -1101,10 +1112,17 @@ export class TelegramConnectorAdapter implements ConnectorAdapter {
     if (session.refreshedAt !== undefined && now - session.refreshedAt < floorMs) return
     session.refreshedAt = now
     if (session.typingFallback) return
-    const render = session.activity
-      ? renderTurnActivity(session.activity, session.frame++)
-      : session.markdown
+    // A live turn prefers the RICH card (blockquote + bold header), because the
+    // tool-name meta reads as a separate column instead of trailing off the
+    // headline. Narration has no rich form and stays as plain markdown.
+    const activity = session.activity
+    // Advance the animation frame exactly once per render, whether or not the
+    // rich path is the one that ends up being sent.
+    const frame = activity ? session.frame++ : session.frame
+    const richRender = activity ? renderTurnActivityRich(activity, frame) : undefined
+    const plainRender = activity ? renderTurnActivity(activity, frame) : session.markdown
     try {
+      const render = richRender ?? plainRender
       if (render) {
         await this.bot.api.sendRichMessageDraft(chatId, session.draftId, { markdown: render })
       } else {
@@ -1112,6 +1130,9 @@ export class TelegramConnectorAdapter implements ConnectorAdapter {
       }
       return
     } catch (error) {
+      // Rich drafts can be rejected outright (older Bot API). The plain variant
+      // carries the same information with no markdown syntax to fail on.
+      const render = plainRender
       if (render) {
         try {
           await this.bot.api.sendMessageDraft(

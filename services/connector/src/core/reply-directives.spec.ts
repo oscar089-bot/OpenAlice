@@ -7,9 +7,20 @@ it('resolves only successful references, retaining unknown and missing paths', (
   expect(renderReplyReferences(text, parsed.references, new Set(['report/日报.pdf']))).toBe('Report   [[missing.png]] [[daily]]')
 })
 it('keeps code, escaped brackets and incomplete references literal', () => {
-  for (const text of ['`[[a.png]]`', '`example\n[[a.png]]`', '```text\n[[a.png]]\n```', '~~~\n[[no-reply]]\n~~~', '\\[[a.png]]', '[[unfinished.png']) {
+  // A code span that is NOT exactly one reference stays literal: a longer
+  // snippet, a FENCED block, an escape, and an unfinished bracket are all
+  // discussion rather than an attachment.
+  for (const text of ['`example\n[[a.png]]`', '```text\n[[a.png]]\n```', '~~~\n[[no-reply]]\n~~~', '\\[[a.png]]', '[[unfinished.png']) {
     expect(parse(text)).toEqual({ references: [], silent: false })
   }
+})
+it('recovers a reference the model wrapped in a single code span', () => {
+  // The reported bug: wrapping `[[path]]` in backticks left the brackets as
+  // literal text, so the operator saw `[[a.png]]` instead of the image.
+  const parsed = parse('Here it is: `[[a.png]]`')
+  expect(parsed.references.map(r => r.path)).toEqual(['a.png'])
+  expect(renderReplyReferences('Here it is: `[[a.png]]`', parsed.references, new Set(['a.png'])))
+    .toBe('Here it is:')
 })
 it('rejects absolute paths, traversal, URLs and unknown extensions', () => {
   expect(parse('[[/tmp/a.png]] [[../a.png]] [[https://a/a.png]] [[file:a.png]] [[note|a.pdf]]').references).toEqual([])

@@ -28,7 +28,30 @@ export function parseContentReferences(text: string): { references: ContentRefer
   const scan = /(`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:\n\1[^\n]*(?:\n|$)|$)|(`+)[\s\S]*?\2|\\\[\[|\[\[([^\]\n]+)\]\]/g
   for (const match of text.matchAll(scan)) {
     const path = match[3]?.trim()
-    if (!path) continue
+    if (!path) {
+      // An INLINE code span whose ENTIRE body is a real reference.
+      //
+      // Wrapping `[[path]]` in backticks is an easy mistake, and it used to fail
+      // SILENTLY: the reference stayed literal text, so the operator saw
+      // `[[reports/x.png]]` instead of the file. Unwrapping here is what stops an
+      // intended attachment from arriving as raw brackets.
+      //
+      // Deliberately narrow: a placeholder like `[[path]]` is not a valid
+      // reference and stays readable code, a FENCED block is never unwrapped
+      // (that is where a literal example belongs), and `no-reply` is never
+      // honored inside code because a backticked one is far likelier to be
+      // literal discussion than a directive that suppresses the whole reply.
+      const ticks = match[2]
+      if (ticks !== undefined) {
+        const body = match[0].slice(ticks.length, match[0].length - ticks.length).trim()
+        const wrapped = /^\[\[([^\]\n]+)\]\]$/.exec(body)
+        const codePath = wrapped?.[1]?.trim()
+        if (codePath && codePath !== 'no-reply' && (parseMarketReference(codePath) || isFileReference(codePath))) {
+          references.push({ path: codePath, start: match.index, end: match.index + match[0].length })
+        }
+      }
+      continue
+    }
     if (path === 'no-reply') { silent = true; continue }
     if (parseMarketReference(path) || isFileReference(path)) references.push({ path, start: match.index, end: match.index + match[0].length })
   }

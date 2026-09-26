@@ -10,6 +10,7 @@ import {
   mappedToolNamesForScope,
 } from './cli-commands.js'
 import { createNewsArchiveTools } from '../tool/news.js'
+import { createWebSearchTools, createWebReaderTools } from '../tool/web.js'
 import { createMarketSearchTools } from '../tool/market.js'
 import { createVendorTools } from '../tool/market-vendors.js'
 import { createEquityTools } from '../tool/equity.js'
@@ -49,6 +50,8 @@ describe('CLI_EXPORTS — data export (global tools)', () => {
   tc.register(createVendorTools(any), 'market-vendors')
   tc.register(createEquityTools(any), 'equity')
   tc.register(createNewsArchiveTools(any), 'rss')
+  tc.register(createWebSearchTools(), 'web-search')
+  tc.register(createWebReaderTools(), 'web-reader')
   tc.register(createMarketBarsTools(any), 'market-bars')
   tc.register(createQuantTools(any), 'quant')
   tc.register(createSnapshotTools(any), 'snapshot')

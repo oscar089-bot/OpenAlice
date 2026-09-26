@@ -180,6 +180,18 @@ export interface WatchSpec {
   position?: WatchPosition
   /** ISO timestamp after which the watcher expires. */
   expiry?: string
+  /** Presentation context for the board card. Never read by the evaluator. */
+  meta?: WatchMeta
+}
+
+/** Plan context the model authors alongside the rules, shown on the board. */
+export interface WatchMeta {
+  grade?: string
+  rating?: string | number
+  phase?: string
+  nextStep?: string
+  waitingTrigger?: string
+  invalidationConditions?: string[]
 }
 
 export function emptyWatchState(now: string): WatchState {

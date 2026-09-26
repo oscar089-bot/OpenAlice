@@ -78,6 +78,7 @@ import { artifactConversationToolFactories } from './tool/conversation-artifacts
 import { createToolCallLog } from './core/tool-call-log.js'
 import { NewsCollectorStore, NewsCollector } from './domain/news/index.js'
 import { createNewsArchiveTools } from './tool/news.js'
+import { createWebSearchTools, createWebReaderTools } from './tool/web.js'
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 let runtimeLock: OpenAliceRuntimeLock | null = null
@@ -264,6 +265,11 @@ async function main() {
   if (config.news.enabled) {
     toolCenter.register(createNewsArchiveTools(newsStore), 'rss')
   }
+  // Open-web access: multi-backend web search (Python `ddgs`, brave/bing/
+  // google/yahoo/... fallback) + Jina-Reader page fetch. Distinct from `rss`
+  // (the subscribed-feed archive).
+  toolCenter.register(createWebSearchTools(), 'web-search')
+  toolCenter.register(createWebReaderTools(), 'web-reader')
   // v1 calculateIndicator (createAnalysisTools) is retired from the tool surface
   // — calculateQuant (v2, barId-keyed) supersedes it and the two descriptions
   // confused the model / bloated context. The code remains for now.

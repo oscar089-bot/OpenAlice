@@ -344,7 +344,7 @@ export const issueUpdateFactory: WorkspaceToolFactory = {
         timeout: z.enum(ISSUE_TIMEOUTS).nullable().optional().describe('Optional scheduled-run watchdog; null removes the limit so the agent may run until it exits.'),
         what: z.string().min(1).optional().describe('Canonical markdown work definition; exact scheduled prompt.'),
         commentPrompt: z.string().nullable().optional().describe('Comment-reply Input Prompt template. Must include {comment}. Null restores the default wrapper.'),
-        watch: z.record(z.string(), z.unknown()).nullable().optional().describe('Deterministic market watcher. null removes it and its persisted state. Shape: { pair, assetClass?, direction?, timeframe, rules:[{type,side?,level?,low?,high?,timeframe?}], invalidationRules?, managementRules?, position?, expiry? }. See the self-scheduling skill.'),
+        watch: z.record(z.string(), z.unknown()).nullable().optional().describe('Deterministic market watcher. null removes it and its persisted state. Shape: { pair, assetClass?, direction?, timeframe, rules:[{type,side?,level?,low?,high?,timeframe?}], invalidationRules?, managementRules?, position?, expiry?, meta? }. meta is presentation only and is what the watcher board shows: { grade?, rating?, phase?, nextStep?, waitingTrigger?, invalidationConditions? }. Rewriting the block re-arms the watcher with fresh state. See the self-scheduling skill.'),
       }),
       execute: async ({ id, status, priority, assignee, agent, credential, credentialSource, model, effort, timeout, what, commentPrompt, watch }) => {
         const dir = selfDir(ctx)
@@ -534,7 +534,7 @@ export const issueCreateFactory: WorkspaceToolFactory = {
         effort: z.enum(MODEL_REASONING_EFFORTS).optional().describe('Reasoning effort for one scheduled run.'),
         timeout: z.enum(ISSUE_TIMEOUTS).optional().describe('Optional scheduled-run watchdog (15m/30m/45m/60m). Omit for no limit.'),
         commentPrompt: z.string().min(1).optional().describe('Comment-reply Input Prompt template. Must include {comment}. Omit for the default wrapper.'),
-        watch: z.record(z.string(), z.unknown()).optional().describe('Deterministic market watcher. When its condition first becomes true, the owning Session is woken with the What as the plan and a Discord alert is sent. Shape: { pair, assetClass?, direction?, timeframe, rules:[{type,side?,level?,low?,high?,timeframe?}], invalidationRules?, managementRules?, position?, expiry? }. See the self-scheduling skill for the full grammar.'),
+        watch: z.record(z.string(), z.unknown()).optional().describe('Deterministic market watcher. When its condition first becomes true, the owning Session is woken with the What as the plan and an alert is sent. Shape: { pair, assetClass?, direction?, timeframe, rules:[{type,side?,level?,low?,high?,timeframe?}], invalidationRules?, managementRules?, position?, expiry?, meta? }. meta is presentation only and is what the watcher board shows: { grade?, rating?, phase?, nextStep?, waitingTrigger?, invalidationConditions? }. See the self-scheduling skill for the full grammar.'),
       }),
       execute: async ({ title, id, status, priority, assignee, when, what, agent, credential, credentialSource, model, effort, timeout, commentPrompt, watch }) => {
         const dir = selfDir(ctx)

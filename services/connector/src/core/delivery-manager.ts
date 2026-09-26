@@ -50,6 +50,13 @@ import {
   type ConnectorWorkClaim,
   type ConnectorWorkQueueStore,
 } from './work-queue.js'
+import {
+  MAX_DELIVERY_ATTEMPTS,
+  loadPendingDeliveries,
+  retryDelayMs,
+  savePendingDeliveries,
+  type PendingDeliveryEntry,
+} from './pending-delivery-store.js'
 
 export interface DeliveryManagerOptions {
   renderMarket?(reference: string): Promise<ConnectorAttachment>
@@ -65,6 +72,9 @@ export interface DeliveryManagerOptions {
   /** First retry delay after a transient adapter start failure. Doubles each attempt up to 60s. */
   adapterStartRetryDelayMs?: number
   workQueue?: ConnectorWorkQueueStore
+  /** Where undelivered messages are queued. Overridable so a spec never reads
+   *  or writes the operator's real retry file. */
+  pendingDeliveryPath?: string
 }
 
 /**
@@ -76,8 +86,22 @@ export const MAX_INBOUND_OWNER_MESSAGES = 100
 export const DEFAULT_ADAPTER_START_RETRY_DELAY_MS = 5_000
 const MAX_ADAPTER_START_RETRY_DELAY_MS = 60_000
 
+/**
+ * Identity of one non-terminal owner-chat update.
+ *
+ * Live activity reuses a single message id so the transport can edit one
+ * ephemeral slot, which means id and phase alone cannot distinguish frame 1
+ * from frame 9. The payload is what actually changed, so it is what the dedupe
+ * keys on: the same activity twice collapses, a new tool or status does not.
+ */
+function ownerChatFingerprint(message: OwnerChatMessage): string {
+  return `${message.activity ? JSON.stringify(message.activity) : ''}\u0000${message.text ?? ''}`
+}
+
 export class DeliveryManager {
   private readonly replyDeliveries = new Map<string, Promise<void>>()
+  /** Dedupe keys of a live turn's non-terminal updates, pruned when it ends. */
+  private readonly replyProgressKeys = new Map<string, Set<string>>()
   private readonly endedTurns = new Set<string>()
   private readonly activityLeases = new Map<string, ReturnType<typeof setTimeout>>()
   private readonly replyQueues = new Map<string, Promise<void>>()
@@ -88,6 +112,15 @@ export class DeliveryManager {
   private readonly startedAt: string
   private stopped = false
   private readonly workQueue: ConnectorWorkQueueStore
+  /**
+   * Deliveries that failed for a transient reason and are worth retrying.
+   *
+   * Keyed so re-scheduling the same message cannot enqueue a duplicate. Loaded
+   * from disk at start, which is what lets an alert that arrived during a
+   * restart window still land once the transport is actually up.
+   */
+  private pending = new Map<string, PendingDeliveryEntry>()
+  private retryTimer: ReturnType<typeof setInterval> | null = null
 
   constructor(private readonly options: DeliveryManagerOptions) {
     this.startedAt = options.startedAt ?? new Date().toISOString()
@@ -107,6 +140,15 @@ export class DeliveryManager {
   }
 
   async start(): Promise<void> {
+    // Adopt anything a previous run could not deliver BEFORE booting adapters,
+    // so an alert that arrived while the service was down is re-attempted as
+    // soon as the transport that owns it comes up.
+    for (const entry of await loadPendingDeliveries(this.pendingDeliveryPath)) {
+      this.pending.set(entry.key, entry)
+    }
+    if (this.pending.size > 0) {
+      console.warn(`[connector] ${this.pending.size} undelivered message(s) restored; retrying.`)
+    }
     this.installEnabledAdapters()
     for (const [id, config] of Object.entries(this.options.config.adapters)) {
       if (!config.enabled || !this.adapters.has(id)) continue
@@ -114,6 +156,137 @@ export class DeliveryManager {
         this.handleAdapterStartFailure(id, config, error, 0)
       })
     }
+    this.retryTimer = setInterval(() => void this.retryPending(), 5_000)
+    this.retryTimer.unref?.()
+  }
+
+  /**
+   * Re-attempt every due queued delivery.
+   *
+   * Sequential and short: this runs on a timer against a bounded queue, so the
+   * goal is to drain it without competing with live traffic for a rate-limited
+   * transport.
+   */
+  async retryPending(now = Date.now()): Promise<void> {
+    if (this.stopped || this.pending.size === 0) return
+    const due = [...this.pending.values()].filter((entry) => entry.nextAttemptAt <= now)
+    if (due.length === 0) return
+    let changed = false
+    for (const entry of due) {
+      const adapter = this.adapters.get(entry.connectorId)
+      // Not running yet: leave it queued and let the next tick try. This is the
+      // restart case, and dropping it here is exactly the bug being fixed.
+      if (!adapter) continue
+      const ok = await this.attemptPending(entry).catch(() => false)
+      if (ok) {
+        this.pending.delete(entry.key)
+        changed = true
+        await this.record({
+          correlationId: entry.key,
+          direction: 'outbound',
+          stage: 'delivery.succeeded',
+          connectorId: entry.connectorId,
+          payload: { kind: entry.kind, retriedAfter: entry.attempts, reason: 'retry' },
+        })
+        continue
+      }
+      const attempts = entry.attempts + 1
+      if (attempts >= MAX_DELIVERY_ATTEMPTS) {
+        // Give up LOUDLY. Silently dropping the last attempt is what left the
+        // operator with no idea a message had been lost.
+        this.pending.delete(entry.key)
+        changed = true
+        await this.record({
+          correlationId: entry.key,
+          direction: 'outbound',
+          stage: 'delivery.failed',
+          connectorId: entry.connectorId,
+          payload: { kind: entry.kind, reason: 'retries-exhausted', attempts, error: entry.lastError },
+        })
+        await this.notifyDeliveryFailure(entry).catch(() => undefined)
+        continue
+      }
+      this.pending.set(entry.key, { ...entry, attempts, nextAttemptAt: now + retryDelayMs(attempts) })
+      changed = true
+    }
+    if (changed) await this.persistPending()
+  }
+
+  /** Re-send one queued entry. Returns true when it landed. */
+  private async attemptPending(entry: PendingDeliveryEntry): Promise<boolean> {
+    const adapter = this.adapters.get(entry.connectorId)
+    if (!adapter) return false
+    try {
+      if (entry.kind === 'notification') {
+        await adapter.deliver(entry.payload as InboxNotification)
+      } else {
+        await adapter.sendOwnerChat?.(entry.payload as OwnerChatMessage)
+      }
+      return true
+    } catch (error) {
+      entry.lastError = error instanceof Error ? error.message : String(error)
+      // A non-retryable error (bad payload, rejected parse) will fail forever.
+      // Stop now rather than burn the retry budget on it.
+      if (!isRetryableDeliveryError(error)) entry.attempts = MAX_DELIVERY_ATTEMPTS - 1
+      return false
+    }
+  }
+
+  /**
+   * Tell the operator that a message was permanently lost.
+   *
+   * The whole complaint that started this was not being told. If the transport
+   * cannot carry the message, at least say so on the one that still works.
+   */
+  private async notifyDeliveryFailure(entry: PendingDeliveryEntry): Promise<void> {
+    const notice = `OpenAlice could not deliver a message after ${MAX_DELIVERY_ATTEMPTS} attempts `
+      + `(${entry.kind}). Last error: ${entry.lastError ?? 'unknown'}. `
+      + 'The content is still in OpenAlice Inbox.'
+    for (const [id, adapter] of this.adapters) {
+      if (id === entry.connectorId) continue
+      await adapter.sendOwnerText(notice).catch(() => undefined)
+    }
+  }
+
+  private get pendingDeliveryPath(): string | undefined {
+    return this.options.pendingDeliveryPath
+  }
+
+  private async persistPending(): Promise<void> {
+    await savePendingDeliveries([...this.pending.values()], this.pendingDeliveryPath).catch((error) => {
+      console.warn('[connector] could not persist pending deliveries:', error instanceof Error ? error.message : error)
+    })
+  }
+
+  /**
+   * Queue a delivery for retry when its failure was transient.
+   *
+   * Deliberately narrow: only retryable errors are queued, and the entry is
+   * keyed so a re-send of the same message replaces rather than duplicates it.
+   */
+  private async scheduleRetry(
+    key: string,
+    connectorId: string,
+    kind: 'notification' | 'owner-chat',
+    payload: unknown,
+    error: unknown,
+  ): Promise<boolean> {
+    if (!isRetryableDeliveryError(error)) return false
+    if (this.stopped) return false
+    const existing = this.pending.get(key)
+    if (existing) return true
+    this.pending.set(key, {
+      key,
+      connectorId,
+      kind,
+      payload,
+      attempts: 1,
+      firstFailedAt: Date.now(),
+      nextAttemptAt: Date.now() + retryDelayMs(1),
+      lastError: error instanceof Error ? error.message : String(error),
+    })
+    await this.persistPending()
+    return true
   }
 
   enqueue(notification: InboxNotification): ConnectorDeliveryReceipt {
@@ -507,20 +680,52 @@ export class DeliveryManager {
   }
 
   async sendOwnerChat(message: OwnerChatMessage, correlationId = message.id): Promise<void> {
-    const key = `${message.adapterId}:${message.id}:${message.phase}`
+    const terminal = message.phase === 'final' || message.phase === 'failed'
+    // Terminal phases are sent exactly once per id: a replay of a final reply
+    // must never post the answer twice, and uncertain network failures are
+    // retained so a retry does not duplicate an upload.
+    //
+    // Non-terminal phases are the OPPOSITE contract. A turn's live activity
+    // deliberately reuses ONE stable id and `phase: 'progress'` so the
+    // transport edits a single ephemeral slot in place. Keying those on
+    // id+phase alone made the FIRST frame register the key and every later
+    // frame hit `existing`, so the slot froze on the opening state while tools
+    // kept running. The payload is therefore part of the key for those phases:
+    // an identical resend still collapses, a changed one is delivered.
+    const key = terminal
+      ? `${message.adapterId}:${message.id}:${message.phase}`
+      : `${message.adapterId}:${message.id}:${message.phase}:${ownerChatFingerprint(message)}`
     const existing = this.replyDeliveries.get(key)
     if (existing) return existing
     const queueKey = `${message.adapterId}:${message.conversationId}`
+    // Remember this turn's non-terminal keys so the terminal phase can drop
+    // them. They only exist to collapse repeated frames within one live turn.
+    if (!terminal) {
+      const keys = this.replyProgressKeys.get(queueKey) ?? new Set<string>()
+      keys.add(key)
+      if (keys.size > 200) {
+        const oldest = keys.values().next().value
+        if (oldest !== undefined) keys.delete(oldest)
+      }
+      this.replyProgressKeys.set(queueKey, keys)
+    }
     const operation = (this.replyQueues.get(queueKey) ?? Promise.resolve()).catch(() => undefined)
       .then(async () => {
-        const terminal = message.phase === 'final' || message.phase === 'failed'
-        if (this.endedTurns.has(queueKey) && (!terminal || message.text)) return
+        const ended = this.endedTurns.has(queueKey)
+        if (ended && (!terminal || message.text)) return
         const timer = this.activityLeases.get(queueKey)
         if (timer) clearTimeout(timer)
         this.activityLeases.delete(queueKey)
         if (terminal) {
           this.endedTurns.add(queueKey)
           if (this.endedTurns.size > 2000) this.endedTurns.delete(this.endedTurns.values().next().value!)
+          // Drop this turn's progress dedupe keys so a long session cannot let
+          // repeated frames evict a genuine terminal key from the bounded map.
+          const progressKeys = this.replyProgressKeys.get(queueKey)
+          if (progressKeys) {
+            for (const progressKey of progressKeys) this.replyDeliveries.delete(progressKey)
+            this.replyProgressKeys.delete(queueKey)
+          }
           await this.adapters.get(message.adapterId)?.stopOwnerActivity?.(message.conversationId)
         } else if (message.activityLeaseMs) {
           const lease = setTimeout(() => {
@@ -648,6 +853,17 @@ export class DeliveryManager {
           error: error instanceof Error ? error.message : String(error),
         },
       })
+      // A final reply that fails to send is invisible to the operator: the
+      // activity slot simply stops and no text ever arrives. Queue it so the
+      // analysis actually reaches the chat, and so a permanent failure becomes
+      // visible instead of silent.
+      if (message.phase === 'final' && message.text) {
+        const queued = await this.scheduleRetry(`chat-${adapter.id}-${message.conversationId}`, adapter.id, 'owner-chat', message, error)
+        // Accepting a queued delivery is the honest answer: this service will
+        // retry. Rethrowing made Alice mark the turn "uncertain" and then send
+        // a meaningless activity-close, which is worse than saying nothing.
+        if (queued) return
+      }
       throw error
     }
   }
@@ -673,6 +889,8 @@ export class DeliveryManager {
   async stop(): Promise<void> {
     for (const timer of this.activityLeases.values()) clearTimeout(timer)
     this.activityLeases.clear()
+    if (this.retryTimer) clearInterval(this.retryTimer)
+    this.retryTimer = null
     this.stopped = true
     for (const id of [...this.bootRetries.keys()]) this.clearAdapterStartRetry(id)
     await Promise.allSettled([...this.adapters.values()].map((adapter) => adapter.stop()))
@@ -792,6 +1010,13 @@ export class DeliveryManager {
         connectorId: adapter.id,
         payload: { notificationId: notification.id, error: error instanceof Error ? error.message : String(error) },
       })
+      // A refusal while the transport is still coming up must not lose the
+      // message. Queue it so the retry tick delivers it once the session is
+      // ready — the alert is the whole point of the feature.
+      const queued = await this.scheduleRetry(`notify-${adapter.id}-${notification.id}`, adapter.id, 'notification', notification, error)
+      // When it is queued, this service now OWNS the delivery. Rethrowing would
+      // tell the caller it was rejected outright, which is no longer true.
+      if (queued) return
       throw error
     }
   }
@@ -801,6 +1026,28 @@ export class DeliveryManager {
       console.warn('[connector] I/O delivery event could not be recorded:', error instanceof Error ? error.message : error)
     })
   }
+}
+
+/**
+ * True when a delivery failed for a reason that can plausibly resolve itself.
+ *
+ * The motivating case: a send lands while the adapter's session is still
+ * coming up after a restart, and the transport refuses it. Retrying is exactly
+ * right there. A malformed payload or a rejected parse will fail identically
+ * forever, so those are NOT retried — replaying them would be noise.
+ */
+export function isRetryableDeliveryError(error: unknown): boolean {
+  const message = (error instanceof Error ? error.message : String(error)).toLowerCase()
+  return message.includes('not ready')
+    || message.includes('not linked')
+    || message.includes('not running')
+    || message.includes('econnrefused')
+    || message.includes('econnreset')
+    || message.includes('etimedout')
+    || message.includes('timeout')
+    || message.includes('fetch failed')
+    || message.includes('socket hang up')
+    || message.includes('network')
 }
 
 function journalArtifactPayload(delivery: ConnectorArtifactDelivery): Record<string, unknown> {

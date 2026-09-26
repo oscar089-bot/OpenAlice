@@ -100,6 +100,17 @@ describe('specFingerprint', () => {
   it('changes when the pair changes', () => {
     expect(specFingerprint({ ...SPEC, pair: 'ETH-USDT' })).not.toBe(specFingerprint(SPEC))
   })
+
+  // Meta is presentation only. If it counted, a model that fixed a typo in its
+  // grade would reset fired-condition history and replay an alert the operator
+  // had already seen.
+  it('ignores the presentation meta block', () => {
+    const graded = {
+      ...SPEC,
+      meta: { grade: 'A+', phase: 'reclaim', nextStep: 'Re-check volume.' },
+    }
+    expect(specFingerprint(graded)).toBe(specFingerprint(SPEC))
+  })
 })
 
 describe('collectWatches', () => {
