@@ -543,10 +543,18 @@ export class TelegramConnectorAdapter implements ConnectorAdapter {
     const context = this.adapterContext
     if (!token || !context) throw new Error('Telegram adapter is not armed')
     if (this.tracker.get().status === 'degraded') this.tracker.connecting('Reconnecting to Telegram.')
+    // grammY's default HttpError hides the underlying cause, and a failing
+    // setup call is retried until our readiness timer wins — which reads as a
+    // generic 30s timeout. OPENALICE_TELEGRAM_DEBUG=1 restores the cause for
+    // diagnosis without leaking it into ordinary logs.
+    const telegramDebug = process.env['OPENALICE_TELEGRAM_DEBUG'] === '1'
     const bot = new Bot(token, {
-      client: this.proxy.nodeFetchAgent
-        ? { baseFetchConfig: { agent: this.proxy.nodeFetchAgent } }
-        : undefined,
+      client: {
+        ...(telegramDebug ? { sensitiveLogs: true } : {}),
+        ...(this.proxy.nodeFetchAgent
+          ? { baseFetchConfig: { agent: this.proxy.nodeFetchAgent } }
+          : {}),
+      },
     })
     this.bot = bot
     this.sessionReady = false
@@ -1114,7 +1122,8 @@ export class TelegramConnectorAdapter implements ConnectorAdapter {
     if (session.typingFallback) return
     // A live turn prefers the RICH card (blockquote + bold header), because the
     // tool-name meta reads as a separate column instead of trailing off the
-    // headline. Narration has no rich form and stays as plain markdown.
+    // headline. Narration renders in BOTH variants — between the header and the
+    // meta — so the rich path does not lose it.
     const activity = session.activity
     // Advance the animation frame exactly once per render, whether or not the
     // rich path is the one that ends up being sent.

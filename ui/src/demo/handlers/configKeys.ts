@@ -262,7 +262,7 @@ export const configKeysHandlers = [
       marketData: {
         enabled: true,
         providers: { equity: 'yfinance', crypto: 'yfinance', currency: 'yfinance', commodity: 'yfinance' },
-        extraVendors: [],
+        extraVendors: ['okx'],
         providerKeys: {},
         hub: { enabled: true, baseUrl: 'https://traderhub.openalice.ai' },
       },

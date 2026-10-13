@@ -7,7 +7,8 @@
  *
  * equity    — SymbolIndex (SEC/TMX local cache, regex, zero-latency)
  * commodity — CommodityCatalog (canonical catalog, ~25 items)
- * crypto    — cryptoClient.search on yfinance (online fuzzy)
+ * crypto    — cryptoClient.search fanned across crypto vendors (default yfinance
+ *             + user-enabled extras such as okx; online fuzzy)
  * currency  — currencyClient.search on yfinance (online fuzzy, including crosses)
  */
 import type { SymbolIndex } from './equity/symbol-index.js'
@@ -30,6 +31,11 @@ export interface MarketSearchDeps {
   cryptoClient: CryptoClientLike
   currencyClient: CurrencyClientLike
   commodityCatalog: CommodityCatalog
+  /** Crypto vendors to fan search across — [primary, ...extras]. Absent means
+   *  the legacy single-vendor behavior (yfinance only), so existing callers
+   *  and specs keep working unchanged. Resolved per call like equityVendors so
+   *  enabling a vendor takes effect on the next search without a restart. */
+  cryptoVendors?: string[] | (() => string[] | Promise<string[]>)
 }
 
 export interface MarketSearchResult {
@@ -87,6 +93,13 @@ export async function aggregateSymbolSearch(
     ? await deps.equityVendors()
     : deps.equityVendors
   const primaryEquity = equityVendors[0] ?? 'yfinance'
+  // Crypto federation is optional: without it, keep the historical single
+  // vendor so behavior is identical for callers that never set it.
+  const cryptoVendors = deps.cryptoVendors
+    ? (typeof deps.cryptoVendors === 'function'
+        ? await deps.cryptoVendors()
+        : deps.cryptoVendors)
+    : ['yfinance']
 
   // Local SEC index — US-only, zero-latency, authoritative for US tickers.
   // Attributed to the primary equity vendor (its symbols feed that provider).
@@ -98,14 +111,14 @@ export async function aggregateSymbolSearch(
     .search(q, boundedLimit)
     .map((r) => ({ ...r, assetClass: 'commodity' as const }))
 
-  // Online searches, concurrent: crypto + currency on yfinance; equity fanned
-  // out over EVERY enabled vendor (default yfinance + user-opted extras like
-  // eastmoney). Each equity vendor lives in its own symbol namespace — yfinance
-  // returns Yahoo tickers (600519.SS), eastmoney returns secids (1.600519) for
-  // CN names yfinance can't match — so all are kept as redundant candidates.
-  const [coreSettled, equitySettled] = await Promise.all([
+  // Online searches, concurrent: currency on yfinance; crypto fanned across
+  // every enabled crypto vendor (default yfinance + user-opted extras such as
+  // okx, whose keyless exchange feed is what resolves exchange-native symbols
+  // like SOL-USDT). Equity fans out over EVERY enabled vendor (default yfinance
+  // + user-opted extras like eastmoney). Each vendor lives in its own symbol
+  // namespace, so all are kept as redundant candidates.
+  const [coreSettled, equitySettled, cryptoSettled] = await Promise.all([
     Promise.allSettled([
-      deps.cryptoClient.search({ query: q, provider: 'yfinance' }),
       deps.currencyClient.search({ query: q, provider: 'yfinance' }),
     ]),
     Promise.allSettled(
@@ -115,12 +128,31 @@ export async function aggregateSymbolSearch(
           .then((rows) => ({ vendor: v, rows })),
       ),
     ),
+    Promise.allSettled(
+      cryptoVendors.map((v) =>
+        deps.cryptoClient
+          .search({ query: q, provider: v })
+          .then((rows) => ({ vendor: v, rows })),
+      ),
+    ),
   ])
-  const [cryptoSettled, currencySettled] = coreSettled
+  const [currencySettled] = coreSettled
 
-  const cryptoResults = (cryptoSettled.status === 'fulfilled' ? cryptoSettled.value : []).map(
-    (r) => ({ ...r, assetClass: 'crypto' as const }),
-  )
+  // Crypto hits are keyed by their own vendor so a yfinance `SOLUSD` and an
+  // okx `SOL-USDT` both survive as distinct candidates.
+  const seenCrypto = new Set<string>()
+  const cryptoResults: MarketSearchResult[] = []
+  for (const settled of cryptoSettled) {
+    if (settled.status !== 'fulfilled') continue
+    const { vendor, rows } = settled.value
+    for (const r of rows) {
+      const sym = String((r as Record<string, unknown>).symbol ?? '')
+      const key = `${vendor}|${sym.toUpperCase()}`
+      if (!sym || seenCrypto.has(key)) continue
+      seenCrypto.add(key)
+      cryptoResults.push({ ...r, symbol: sym, assetClass: 'crypto' as const, sourceId: vendor })
+    }
+  }
 
   const currencyResults = (currencySettled.status === 'fulfilled' ? currencySettled.value : [])
     .map((r) => ({ ...r, assetClass: 'currency' as const }))

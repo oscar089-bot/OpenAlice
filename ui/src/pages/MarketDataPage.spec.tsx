@@ -11,6 +11,9 @@ const mocks = vi.hoisted(() => ({
   updateConfig: vi.fn(),
   updateConfigImmediate: vi.fn(),
   retry: vi.fn(),
+  /** Mirrors the shipped `extraVendors` default so the chart-vendor rows are
+   *  exercised against the same seed a fresh install gets. */
+  extraVendors: ['okx'] as string[],
 }))
 
 vi.mock('../api', () => ({
@@ -24,18 +27,20 @@ vi.mock('../api', () => ({
 
 vi.mock('../hooks/useConfigPage', () => ({
   useConfigPage: () => ({
-    config: {
-      enabled: true,
-      hub: { enabled: false, baseUrl: 'https://traderhub.openalice.ai' },
-      extraVendors: [],
-      providerKeys: {
-        fmp: 'test-fmp-key',
-        fred: 'test-fred-key',
-        bls: 'test-bls-key',
-        eia: 'test-eia-key',
-        econdb: 'test-econdb-key',
-        intrinio: 'test-intrinio-key',
-      },
+    get config() {
+      return {
+        enabled: true,
+        hub: { enabled: false, baseUrl: 'https://traderhub.openalice.ai' },
+        extraVendors: mocks.extraVendors,
+        providerKeys: {
+          fmp: 'test-fmp-key',
+          fred: 'test-fred-key',
+          bls: 'test-bls-key',
+          eia: 'test-eia-key',
+          econdb: 'test-econdb-key',
+          intrinio: 'test-intrinio-key',
+        },
+      }
     },
     status: 'idle',
     loadError: false,
@@ -47,6 +52,7 @@ vi.mock('../hooks/useConfigPage', () => ({
 
 beforeEach(() => {
   vi.clearAllMocks()
+  mocks.extraVendors = ['okx']
   mocks.testProvider.mockResolvedValue({ ok: true })
 })
 
@@ -55,6 +61,11 @@ afterEach(cleanup)
 function openProviderKeys() {
   render(<MarketDataPage />)
   fireEvent.click(screen.getByRole('button', { name: /Advanced/ }))
+}
+
+/** Chart-vendor rows render on the page itself — no Advanced disclosure. */
+function openChartVendors() {
+  render(<MarketDataPage />)
 }
 
 describe('MarketDataPage provider credentials', () => {
@@ -102,5 +113,41 @@ describe('MarketDataPage provider credentials', () => {
 
     expect(await screen.findByRole('button', { name: 'BLS key test failed' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Test FRED key' })).toBeTruthy()
+  })
+})
+
+describe('MarketDataPage chart vendors', () => {
+  it('shows the seeded crypto vendor as on and keeps the other regional vendors off', () => {
+    openChartVendors()
+
+    // okx ships enabled via the `extraVendors` seed, so exchange-native crypto
+    // resolves out of the box while eastmoney/twse stay opt-in.
+    expect(screen.getByLabelText('OKX').getAttribute('aria-checked')).toBe('true')
+    expect(screen.getByLabelText('Eastmoney 东方财富').getAttribute('aria-checked')).toBe('false')
+    expect(screen.getByLabelText('TWSE + TPEx 臺灣證交所').getAttribute('aria-checked')).toBe('false')
+  })
+
+  it('turning okx off removes exactly that vendor, leaving the rest untouched', () => {
+    openChartVendors()
+
+    fireEvent.click(screen.getByLabelText('OKX'))
+
+    expect(mocks.updateConfigImmediate).toHaveBeenCalledWith({ extraVendors: [] })
+  })
+
+  it('turning a regional vendor on appends it without dropping the seeded vendor', () => {
+    openChartVendors()
+
+    fireEvent.click(screen.getByLabelText('TWSE + TPEx 臺灣證交所'))
+
+    expect(mocks.updateConfigImmediate).toHaveBeenCalledWith({ extraVendors: ['okx', 'twse'] })
+  })
+
+  it('leaves the always-on primary vendor untogglable', () => {
+    openChartVendors()
+
+    // yfinance is the always-on global default: it renders a label, not a switch.
+    expect(screen.queryByLabelText('yfinance')).toBeNull()
+    expect(screen.getByText('Always on')).toBeTruthy()
   })
 })

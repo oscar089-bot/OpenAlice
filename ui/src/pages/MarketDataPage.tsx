@@ -35,6 +35,11 @@ const CHART_VENDORS: ChartVendor[] = [
     alwaysOn: true,
   },
   {
+    id: 'okx',
+    name: 'OKX',
+    desc: 'Keyless crypto spot exchange. The exchange-native source for pairs like BTC-USDT and SOL-USDT; search accepts a base asset (SOL) or a pair (SOLUSDT).',
+  },
+  {
     id: 'eastmoney',
     name: 'Eastmoney 东方财富',
     desc: 'Chinese search and adjusted A-share K-lines from public keyless endpoints.',

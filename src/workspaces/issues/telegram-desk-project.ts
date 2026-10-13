@@ -24,6 +24,29 @@ export function normalizeDeskText(text: string): string {
  * transport truncated it from the bottom — cutting off the current tool. */
 const MAX_ACTIVITY_TOOLS = 8
 
+/** Wire cap for the narration excerpt, matching `ownerChatActivitySchema`. */
+const MAX_ACTIVITY_NARRATION = 400
+
+/**
+ * The turn's latest COMPLETE narration line, or undefined.
+ *
+ * Picks the last non-empty `text` block — not the accumulating `assistantText`
+ * stream. The transport EDITS one slot in place, so a stream would rewrite a
+ * half-written sentence on every token; the last finished block stays put
+ * until the model actually starts a new thought, which is what makes editing
+ * it read as progress. Whitespace is collapsed to one line because the slot
+ * has no room for paragraphs, and the full prose still lands in the reply.
+ */
+function latestNarration(blocks: HeadlessTurnProgress['blocks']): string | undefined {
+  for (let i = blocks.length - 1; i >= 0; i -= 1) {
+    const block = blocks[i]
+    if (block.type !== 'text') continue
+    const text = block.text.replace(/\s+/g, ' ').trim()
+    if (text) return text.slice(0, MAX_ACTIVITY_NARRATION)
+  }
+  return undefined
+}
+
 /**
  * Project a compact turn snapshot onto the wire activity shape.
  *
@@ -46,11 +69,12 @@ export function turnActivityFrom(
   progress: HeadlessTurnProgress,
 ): OwnerChatActivity | undefined {
   const { metrics, blocks } = progress
-  // No tools ⇒ nothing to add. The accepted phase already seeded the slot with
-  // `Thinking`, so a text-only update would re-send the same render and buy
-  // nothing. Narration deliberately does NOT ride this wire: the slot is
-  // overwritten every tick, so prose put here vanished mid-sentence.
-  if (metrics.toolCalls <= 0) return undefined
+  const narration = latestNarration(blocks)
+  // Nothing to say: no tool has run AND the model has not narrated yet. The
+  // accepted phase already seeded the slot with `Thinking`, so an update with
+  // neither would re-send the same render and buy nothing. Narration alone IS
+  // worth a render — it is the sentence that says what the coming work is for.
+  if (metrics.toolCalls <= 0 && !narration) return undefined
   let currentTool: string | undefined
   const tools: OwnerChatTool[] = []
   for (const block of blocks) {
@@ -63,11 +87,24 @@ export function turnActivityFrom(
       ...(block.error ? { error: block.error } : {}),
     })
   }
+
+  // A failure is a CURRENT condition, not a permanent record. Once any LATER
+  // tool succeeds the turn has recovered, so its warning line and its share of
+  // the "N failed" counter both clear. Without this, one early schema error
+  // stayed on the transport through every later success, until eight newer
+  // calls happened to evict it from the tail.
+  const lastSuccessIndex = tools.findLastIndex((tool) => tool.status === 'completed')
+  const isSuperseded = (tool: OwnerChatTool, index: number): boolean =>
+    tool.status === 'failed' && index < lastSuccessIndex
+  const visibleTools = tools.filter((tool, index) => !isSuperseded(tool, index))
+  const unresolvedFailures = visibleTools.filter((tool) => tool.status === 'failed').length
+
   return {
     toolCalls: metrics.toolCalls,
-    toolFailures: metrics.toolFailures,
+    toolFailures: unresolvedFailures,
     ...(currentTool ? { currentTool } : {}),
-    ...(tools.length > 0 ? { recentTools: tools.slice(-MAX_ACTIVITY_TOOLS) } : {}),
+    ...(narration ? { narration } : {}),
+    ...(visibleTools.length > 0 ? { recentTools: visibleTools.slice(-MAX_ACTIVITY_TOOLS) } : {}),
   }
 }
 

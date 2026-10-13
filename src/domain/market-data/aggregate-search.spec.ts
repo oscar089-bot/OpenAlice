@@ -43,3 +43,37 @@ it('retains USD-base and cross-currency pairs in discovery', async () => {
   const results = await aggregateSymbolSearch(d, 'USDJPY', 20)
   expect(results.filter(r => r.assetClass === 'currency').map(r => r.symbol)).toEqual(['USDJPY', 'EURGBP'])
 })
+
+// Crypto federation: yfinance knows Yahoo tickers (SOL-USD -> SOLUSD) while an
+// exchange vendor like OKX returns native ids (SOL-USDT). Both must survive as
+// distinct, vendor-attributed candidates so getBars routes back to the source
+// that actually serves the symbol the user asked for.
+describe('aggregateSymbolSearch crypto federation', () => {
+  it('fans crypto search across every enabled vendor and keeps both namespaces', async () => {
+    const d = deps()
+    d.cryptoVendors = ['yfinance', 'okx']
+    vi.mocked(d.cryptoClient.search).mockImplementation(async (params: Record<string, unknown>) => {
+      const p = String(params['provider'] ?? '')
+      if (p === 'okx') return [{ symbol: 'SOL-USDT', name: 'SOL / USDT' }] as never
+      return [{ symbol: 'SOLUSD', name: 'Solana USD' }] as never
+    })
+
+    const results = await aggregateSymbolSearch(d, 'SOL', 20)
+    const crypto = results.filter((r) => r.assetClass === 'crypto')
+
+    expect(crypto.map((r) => `${r.sourceId}|${r.symbol}`).sort()).toEqual([
+      'okx|SOL-USDT',
+      'yfinance|SOLUSD',
+    ])
+  })
+
+  it('defaults to yfinance alone when cryptoVendors is not configured', async () => {
+    const d = deps()
+    vi.mocked(d.cryptoClient.search).mockResolvedValue([{ symbol: 'SOLUSD' }] as never)
+
+    await aggregateSymbolSearch(d, 'SOL', 20)
+
+    expect(d.cryptoClient.search).toHaveBeenCalledTimes(1)
+    expect(d.cryptoClient.search).toHaveBeenCalledWith({ query: 'SOL', provider: 'yfinance' })
+  })
+})

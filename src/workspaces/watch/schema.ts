@@ -12,7 +12,7 @@
 import { z } from 'zod'
 
 import { MIN_CANDLE_TIMEFRAME_SECONDS, type WatchAssetClass } from './types.js'
-import { SUPPORTED_BAR_INTERVALS } from './snapshot.js'
+import { SUPPORTED_BAR_INTERVALS, validateWatchPair } from './snapshot.js'
 
 const TIMEFRAME_ALIASES: Record<string, string> = {
   '1min': '1m', '1minute': '1m',
@@ -176,6 +176,13 @@ export const watchSpecSchema = z.object({
   /** Presentation context shown on the watcher board card. */
   meta: watchMetaSchema.optional(),
 }).superRefine((spec, ctx) => {
+  // Authoring guard: reject a pair the watcher cannot price, with a correction.
+  // This is the mistake that produced `pair: "yfinance|SOLUSD"` and an endless
+  // "symbol may be delisted" warn — see validateWatchPair for the rationale.
+  const pairVerdict = validateWatchPair(spec.pair, spec.assetClass)
+  if (!pairVerdict.ok) {
+    ctx.addIssue({ code: 'custom', path: ['pair'], message: pairVerdict.error })
+  }
   if (spec.rules.length === 0 && spec.managementRules.length === 0) {
     ctx.addIssue({
       code: 'custom',

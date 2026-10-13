@@ -169,12 +169,16 @@ export async function startUTAService(): Promise<void> {
 
   // ==================== Bind + shutdown ====================
 
+  // UTA is a private, unauthenticated trading backend. Loopback by default;
+  // OPENALICE_INTERNAL_BIND_HOST opts into another interface behind a firewall
+  // or private network. Alice reaches it via OPENALICE_UTA_URL.
+  const internalBindHost = (process.env['OPENALICE_INTERNAL_BIND_HOST'] ?? '127.0.0.1').trim()
   const server = serve({
     fetch: app.fetch,
     port: UTA_PORT,
-    hostname: '127.0.0.1',
+    hostname: internalBindHost,
   })
-  console.log(`[uta] listening on http://127.0.0.1:${UTA_PORT}`)
+  console.log(`[uta] listening on http://${internalBindHost}:${UTA_PORT}`)
 
   let stopping = false
   const shutdown = async (signal: string): Promise<void> => {

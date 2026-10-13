@@ -31,7 +31,7 @@
     "broker-packs:build": "turbo run build --filter=./packages/uta-broker-* && tsx scripts/build-broker-packs.ts && pnpm broker-packs:verify",
     "broker-packs:upgrade-smoke": "tsx scripts/broker-pack-upgrade-smoke.ts",
     "broker-packs:verify": "tsx scripts/verify-broker-packs.ts",
-    "start": "node dist/main.js",
+    "start": "node scripts/guardian/prod.mjs",
     "electron:tsc": "pnpm -F @traderalice/desktop build",
     "electron:build": "pnpm build && pnpm electron:tsc",
     "electron:smoke:demo": "node scripts/electron-demo/run.mjs --smoke",

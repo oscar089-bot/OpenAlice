@@ -72,9 +72,9 @@ The result can be a **labeled dict** or a **positional list** (each entry a sing
 value, max 200). Use this instead of calling the tool N times:
 
 ```python
-h1 = bars("yfinance|BTC-USD", "1h", count=250, asset="crypto")
-h4 = bars("yfinance|BTC-USD", "4h", count=250, asset="crypto")
-d1 = bars("yfinance|BTC-USD", "1d", count=250, asset="crypto")
+h1 = bars("okx|BTC-USDT", "1h", count=250, asset="crypto")
+h4 = bars("okx|BTC-USDT", "4h", count=250, asset="crypto")
+d1 = bars("okx|BTC-USDT", "1d", count=250, asset="crypto")
 { "1h": rsi(h1.close, 14), "4h": rsi(h4.close, 14), "1d": rsi(d1.close, 14) }
 ```
 → `{ "1h": 53.2, "4h": 48.9, "1d": 61.4 }`
@@ -109,9 +109,10 @@ Records: `bbands` → `{upper, middle, lower}`; `macd` → `{macd, signal, histo
 
 ## Examples
 
-> Examples below use `yfinance|…` for brevity (it's always available without a
-> broker). When you have a broker source for the symbol, swap its barId in —
-> see *Choosing a source*.
+> Examples below use `yfinance|…` for equities and `okx|…` for crypto (both are
+> always available without a broker). Crypto uses the exchange-native OKX pairs
+> (`BTC-USDT`), not Yahoo tickers (`BTC-USD`). When you have a broker source for
+> the symbol, swap its barId in — see *Choosing a source*.
 
 ```python
 # Momentum % over the last 20 bars
@@ -123,8 +124,8 @@ s = bars("yfinance|TSLA", "1d", count=60, asset="equity")
 zscore(s.close, 20)
 
 # Does this token move with BTC? (relative strength)
-btc = bars("yfinance|BTC-USD", "1d", count=90, asset="crypto")
-sui = bars("yfinance|SUI-USD", "1d", count=90, asset="crypto")
+btc = bars("okx|BTC-USDT", "1d", count=90, asset="crypto")
+sui = bars("okx|SUI-USDT", "1d", count=90, asset="crypto")
 correlation(btc.close, sui.close)
 
 # A one-call dashboard

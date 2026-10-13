@@ -206,9 +206,17 @@ def fetch_bars(args) -> dict:
     if args.asset_class:
         cmd += ["--asset-class", args.asset_class]
 
+    # `alice --output` creates the file EXCLUSIVELY (O_EXCL) and refuses a path
+    # that already exists — a deliberate guard so a typo cannot clobber a real
+    # dataset (see src/workspaces/cli/bin/openalice-cli.cjs). mkstemp() CREATES
+    # the file, so the path it hands back is precisely the one the CLI rejects:
+    # every run died with "Output already exists". Unlinking immediately keeps
+    # mkstemp's guaranteed-unique name while leaving the CLI a path it can
+    # create itself. The CLI's own O_EXCL still fails safe if anything raced us.
     fd, path = tempfile.mkstemp(prefix="smc-bars-", suffix=".json")
     os.close(fd)
     try:
+        os.unlink(path)
         cmd += ["--output", path]
         proc = subprocess.run(cmd, capture_output=True, text=True)
         if proc.returncode != 0:

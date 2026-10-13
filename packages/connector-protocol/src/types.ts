@@ -244,6 +244,20 @@ export const ownerChatActivitySchema = z.object({
   /** Name of the tool running right now, when one is. */
   currentTool: z.string().min(1).max(120).optional(),
   /**
+   * The turn's LATEST narration — one short paragraph of model prose that
+   * introduced the current work.
+   *
+   * Deliberately the most recent COMPLETE text block, not the accumulating
+   * `assistantText` stream. The transport EDITS one slot in place, so a live
+   * stream would show a half-written sentence that rewrites itself every
+   * token; the last finished block is stable until the model actually moves
+   * on, which is what makes editing it read as progress rather than flicker.
+   *
+   * Bounded and single-paragraph: this rides the ephemeral activity slot, not
+   * the durable reply. The full prose still arrives in the final message.
+   */
+  narration: z.string().min(1).max(400).optional(),
+  /**
    * Most recent tools, oldest first, capped by the projector.
    *
    * This exists because `currentTool` alone loses every call that finished

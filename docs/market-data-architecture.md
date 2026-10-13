@@ -64,7 +64,7 @@ Configuration lives in
     "currency": "yfinance",
     "commodity": "yfinance"
   },
-  "extraVendors": [],
+  "extraVendors": ["okx"],
   "providerKeys": {},
   "hub": {
     "enabled": true,
@@ -72,6 +72,16 @@ Configuration lives in
   }
 }
 ```
+
+`extraVendors` holds the vendors enabled beyond each asset class's primary. It
+ships seeded with `okx`, the keyless OKX spot feed, so exchange-native crypto
+symbols (`SOL-USDT`) with real exchange volume resolve out of the box instead of
+falling back to Yahoo's separate ticker namespace (`SOL-USD`). A vendor only joins an asset class whose search model it actually
+declares, so `okx` (crypto-only) never enters equity fan-out and `eastmoney` /
+`twse` (equity-only) never enter crypto fan-out. The search fan-out
+(`src/domain/market-data/enabled-vendors.ts`) and the vendor picker
+(`listMarketVendors` / `setMarketVendor`, which edit this same array) resolve
+from one list, so the UI and the search fan-out cannot disagree.
 
 Self-hosters may point `hub.baseUrl` at their own compatible TraderHub. A
 `hub:<baseUrl>` credential sentinel routes supported keyed-provider requests

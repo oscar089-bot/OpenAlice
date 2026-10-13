@@ -209,12 +209,39 @@ describe('renderTurnActivity', () => {
     expect(brailleSpinner(8)).toBe(first)
   })
 
-  // The ephemeral slot is activity-only. Model prose belongs in the real reply,
-  // where it is durable and in order; in a slot overwritten every tick it
-  // vanished mid-sentence. The type no longer even carries narration.
-  it('renders activity only, never model prose', () => {
+  // Narration rides the slot, but ONLY as the turn's latest COMPLETE sentence —
+  // never the accumulating token stream. The transport edits this slot in
+  // place, so a half-written sentence would rewrite itself every token and read
+  // as flicker rather than progress.
+  it('renders the narration line between the header and the tool meta', () => {
+    const line = renderTurnActivity({
+      ...base,
+      toolCalls: 34,
+      narration: 'Found it — a real bug in the bridge script.',
+      recentTools: [{ name: 'Bash', status: 'completed' }, { name: 'Read', status: 'completed' }],
+    }, 0)
+    const lines = line.split('\n')
+    expect(lines[0]).toContain('34 actions')
+    expect(lines[1]).toBe('Found it — a real bug in the bridge script.')
+  })
+
+  it('carries narration into the rich variant after the header', () => {
+    const line = renderTurnActivityRich({
+      ...base,
+      toolCalls: 34,
+      narration: 'Patched. Now running the engine.',
+      recentTools: [{ name: 'Bash', status: 'completed' }],
+    }, 0)
+    const lines = line.split('\n')
+    expect(lines[0]).toContain('**Working**')
+    expect(lines[1]).toBe('')
+    expect(lines[2]).toBe('Patched. Now running the engine.')
+    expect(line).toContain('> `bash`')
+  })
+
+  it('omits the narration line entirely when there is none', () => {
     const line = renderTurnActivity({ ...base, toolCalls: 1, currentTool: 'read_file' }, 0)
-    expect(line).not.toContain('Let me')
+    expect(line.split('\n')).toHaveLength(1)
   })
 })
 

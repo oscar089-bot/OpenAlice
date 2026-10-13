@@ -252,22 +252,22 @@ export class McpPlugin implements Plugin {
       getWorkspaceService,
     })
 
-    // LOOPBACK-ONLY, ALWAYS — deliberately NOT honoring OPENALICE_BIND_HOST.
-    // This listener carries the full tool surface (trading included) and the
-    // CLI gateway with NO authentication: its security model is "only local
-    // processes can reach it". Its sole consumers are workspace subprocesses
-    // (native agent CLIs + the CLI shims), which run on the same host
-    // and always dial 127.0.0.1 — so there is no legitimate remote caller to
-    // serve. Remote access is the web port's job (47331), which gates on the
-    // admin token. Without an explicit hostname @hono/node-server binds the
-    // wildcard address, which exposed this surface to the LAN; pinning
-    // loopback closes that structurally rather than via an auth layer the
-    // zero-config CLI injection can't carry. In Docker, OPENALICE_BIND_HOST
-    // =0.0.0.0 still applies to the web plugin; MCP stays on container-local
-    // loopback and is reached by in-container workspaces — only 47331 is
-    // published, so nothing external could reach MCP regardless.
-    this.server = serve({ fetch: app.fetch, port: this.port, hostname: '127.0.0.1' }, (info) => {
-      console.log(`mcp plugin listening on http://127.0.0.1:${info.port}/mcp (+ /mcp/:wsId, /cli)`)
+    // Internal tool/CLI listener. It is UNAUTHENTICATED and carries the full
+    // tool catalog (trading included), so its default protection is the
+    // loopback boundary: only local workspace subprocesses (native agent CLIs
+    // and the CLI shims) dial it. That default is unchanged.
+    //
+    // OPENALICE_INTERNAL_BIND_HOST deliberately controls this listener, and
+    // is a SEPARATE knob from OPENALICE_BIND_HOST: widening the authenticated
+    // web port (47331) must never silently widen this one. Set it only when a
+    // firewall or private network already fronts the host — never expose it
+    // directly to the public internet.
+    //
+    // In Docker, the default keeps MCP on container-local loopback; only 47331
+    // is published, so nothing external reaches it regardless.
+    const internalBindHost = (process.env['OPENALICE_INTERNAL_BIND_HOST'] ?? '127.0.0.1').trim()
+    this.server = serve({ fetch: app.fetch, port: this.port, hostname: internalBindHost }, (info) => {
+      console.log(`mcp plugin listening on http://${internalBindHost}:${info.port}/mcp (+ /mcp/:wsId, /cli)`)
     })
   }
 

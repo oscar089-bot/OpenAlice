@@ -309,6 +309,17 @@ const securitiesSchema = z.object({
   })).default([]),
 })
 
+/**
+ * Vendors enabled out of the box beyond each asset class's primary.
+ *
+ * `okx` is the keyless OKX spot feed: the only enabled vendor that answers
+ * exchange-native crypto symbols (SOL-USDT), so crypto discovery is not
+ * yfinance-only and delayed. It is crypto-scoped, so the search capability
+ * filter keeps it out of equity fan-out. Turning it off removes it from the
+ * picker like any other vendor.
+ */
+export const DEFAULT_EXTRA_VENDORS = ['okx']
+
 const marketDataSchema = z.object({
   enabled: z.boolean().default(true),
   providers: z.object({
@@ -322,13 +333,15 @@ const marketDataSchema = z.object({
     currency: 'yfinance',
     commodity: 'yfinance',
   }),
-  /** Opt-in incremental vendors federated into equity search alongside the
-   *  default provider — regional/specialised sources a user manually enables
-   *  (e.g. 'eastmoney' for CN A-share Chinese-name search + 前复权 K-line).
-   *  yfinance stays the always-on global default; these are purely additive,
-   *  surfaced as extra searchBars candidates in their own namespace, never a
-   *  replacement. Each name must be registered by the embedded provider layer. */
-  extraVendors: z.array(z.string()).default([]),
+  /** Vendors enabled beyond each asset class's primary. Seeded with the keyless
+   *  OKX crypto feed (see DEFAULT_EXTRA_VENDORS) so exchange-native symbols
+   *  resolve by default; the search capability filter drops any vendor that does
+   *  not serve the class being searched, so a crypto-only vendor never joins
+   *  equity search and vice versa. A user enables regional/specialised sources
+   *  (e.g. 'eastmoney' for CN A-share Chinese-name search + 前复权 K-line) by
+   *  adding them here through the vendor picker. Each name must be registered by
+   *  the embedded provider layer. */
+  extraVendors: z.array(z.string()).default(() => [...DEFAULT_EXTRA_VENDORS]),
   providerKeys: z.object({
     fred: z.string().optional(),
     fmp: z.string().optional(),

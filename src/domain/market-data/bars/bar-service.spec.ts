@@ -412,6 +412,32 @@ describe('real-use bar window regressions', () => {
     const call = vi.mocked(deps.equityClient.getHistorical).mock.calls[0][0]
     expect(Date.now() - Date.parse(call.start_date as string)).toBeLessThan(12 * 86400000)
   })
+
+  // The OKX watcher path: a crypto 5-bar intraday request must NOT synthesize a
+  // multi-day window. OKX paginates 300 rows per call and walks backwards to the
+  // start date, so an inflated window becomes extra network round-trips of
+  // history the caller discards — the exact poll-latency bug this fixes.
+  it('keeps a crypto intraday window tight so a paginating venue needs one page', async () => {
+    const deps = makeDeps()
+    const svc = createBarService(deps)
+    for (const interval of ['1m', '15m', '1h']) {
+      await svc.getBars({ symbol: 'SOL-USDT', assetClass: 'crypto' }, { interval, count: 5 })
+    }
+    for (const call of vi.mocked(deps.cryptoClient.getHistorical).mock.calls) {
+      expect(Date.now() - Date.parse(call[0].start_date as string)).toBeLessThan(3 * 86400000)
+    }
+  })
+
+  // Calendar-bound venues keep a weekend-covering floor so a tight bar count
+  // cannot be starved by a Sat/Sun gap (yfinance has no fallback ladder here).
+  it('keeps a weekend-covering floor for equity intraday windows', async () => {
+    const deps = makeDeps()
+    await createBarService(deps).getBars({ barId: 'yfinance|AAPL', assetClass: 'equity' }, { interval: '15m', count: 5 })
+    const call = vi.mocked(deps.equityClient.getHistorical).mock.calls[0][0]
+    const days = (Date.now() - Date.parse(call.start_date as string)) / 86400000
+    expect(days).toBeGreaterThanOrEqual(6)
+    expect(days).toBeLessThan(10)
+  })
   it('explains unsupported 4h instead of leaking enum errors or returning daily data', async () => {
     for (const source of ['yfinance', 'eastmoney', 'twse']) {
       await expect(createBarService(makeDeps()).getBars({ barId: `${source}|AAPL`, assetClass: 'equity' }, { interval: '4h' })).rejects.toThrow('does not supply 4h')

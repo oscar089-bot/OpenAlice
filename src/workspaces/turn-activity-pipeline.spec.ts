@@ -46,24 +46,39 @@ describe('end-to-end activity pipeline', () => {
     const activity = turnActivityFrom(projectTurnProgress(structured))
     expect(activity).toBeDefined()
     expect(activity?.toolCalls).toBe(3)
-    expect(activity?.toolFailures).toBe(1)
-    // All three calls are visible, with their real outcome. A fixed clock
-    // yields no measurable duration here, which is correct: duration is
-    // wall-clock and belongs to its own test, while the failure reason is
-    // pinned because "1 failed" without a reason was the old readout's flaw.
+    // The Bash failure was followed by a successful Write, so the turn
+    // recovered. A recovered failure is no longer a live condition: it leaves
+    // the readout instead of lingering until eight newer calls evict it.
+    expect(activity?.toolFailures).toBe(0)
     expect(activity?.recentTools).toEqual([
       { name: 'Read', status: 'completed' },
-      { name: 'Bash', status: 'failed', error: 'boom' },
       { name: 'Write', status: 'completed' },
     ])
 
     const line = renderTurnActivity(activity!, 2)
-    console.log('\n--- rendered activity ---\n' + line + '\n------------------------')
-    expect(line).toContain('\u2705 Reading a file')
-    expect(line).toContain('\u26A0\uFE0F Running a command')
-    expect(line).toContain('\u2705 Writing a file')
-    expect(line).toContain('3 tools \u00B7 1 failed')
-    // Prose must NOT appear.
-    expect(line).not.toContain('Let me look at the evaluator.')
+    // Successes are counted in the header meta, never listed as rows.
+    expect(line).toContain('read write')
+    expect(line).not.toContain('failed')
+    expect(line).not.toContain('Running a command')
+    // The model's latest COMPLETE narration rides the slot, between the header
+    // and the tool meta. It is the sentence that says what the work is for, so
+    // the activity line reads as progress rather than a bare counter.
+    expect(line.split('\n')[1]).toBe('Let me look at the evaluator.')
+  })
+
+  it('keeps an unresolved failure visible until a later call succeeds', () => {
+    // Same stream, but the turn ENDS on the failure — nothing recovered it, so
+    // the warning and the failure count must both still be shown.
+    const acc = new HeadlessOutputAccumulator()
+    for (const line of LINES.slice(0, 4)) {
+      acc.add(claudeAdapter.extractHeadlessOutputEvents?.(line) ?? [])
+    }
+    const structured = acc.snapshot(true)
+    const activity = turnActivityFrom(projectTurnProgress(structured))
+
+    expect(activity?.toolFailures).toBe(1)
+    const line = renderTurnActivity(activity!, 2)
+    expect(line).toContain('Running a command')
+    expect(line).toContain('boom')
   })
 })

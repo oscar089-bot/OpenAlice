@@ -49,8 +49,12 @@ export class LocalToolGatewayPlugin implements Plugin {
       allowHeaders: ['Content-Type', 'x-openalice-run', 'x-openalice-session'],
     }))
     mountLocalToolGateway(app, this.deps)
-    this.server = serve({ fetch: app.fetch, port: this.port, hostname: '127.0.0.1' }, (info) => {
-      console.log(`local tool gateway listening on http://127.0.0.1:${info.port}/cli`)
+    // Private, unauthenticated CLI-shim surface. Loopback by default; see the
+    // matching note in ./mcp.ts for why this is a separate knob from
+    // OPENALICE_BIND_HOST. Children inherit it via process.env.
+    const internalBindHost = (process.env['OPENALICE_INTERNAL_BIND_HOST'] ?? '127.0.0.1').trim()
+    this.server = serve({ fetch: app.fetch, port: this.port, hostname: internalBindHost }, (info) => {
+      console.log(`local tool gateway listening on http://${internalBindHost}:${info.port}/cli`)
     })
   }
 

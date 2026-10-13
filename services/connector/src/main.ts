@@ -174,8 +174,12 @@ export async function startConnectorService(): Promise<void> {
     return c.json({ error: error instanceof Error ? error.message : String(error) }, 400)
   })
 
-  const server = serve({ fetch: app.fetch, port: CONNECTOR_PORT, hostname: '127.0.0.1' })
-  console.log(`[connector] listening on http://127.0.0.1:${CONNECTOR_PORT}`)
+  // Connector is a private, unauthenticated adapter host. Loopback by default;
+  // OPENALICE_INTERNAL_BIND_HOST opts into another interface behind a firewall
+  // or private network. Alice reaches it via OPENALICE_CONNECTOR_URL.
+  const internalBindHost = (process.env['OPENALICE_INTERNAL_BIND_HOST'] ?? '127.0.0.1').trim()
+  const server = serve({ fetch: app.fetch, port: CONNECTOR_PORT, hostname: internalBindHost })
+  console.log(`[connector] listening on http://${internalBindHost}:${CONNECTOR_PORT}`)
 
   let stopping = false
   const shutdown = async (signal: string): Promise<void> => {

@@ -36,6 +36,7 @@ const VENDOR_CAPABILITY: Record<string, BarCapability> = {
   fmp: 'delayed',
   eastmoney: 'delayed',
   twse: 'delayed', // K-lines via Yahoo chart (symbols are .TW/.TWO)
+  okx: 'realtime', // keyless exchange candles, not a delayed aggregator
 }
 
 const BAR_INTERVALS: readonly BarInterval[] = ['1m', '5m', '15m', '30m', '1h', '4h', '1d', '1w']
@@ -83,7 +84,14 @@ function getCalendarDays(interval: string): number {
   }
 }
 
-/** Approximate calendar days per bar — used to size a count-bounded window. */
+/** True calendar days per bar — used to size a count-bounded window.
+ *
+ *  Intraday units are FRACTIONS of a day: a `1h` bar is 1/24 day, a `15m` bar
+ *  is 15/1440 day. The previous constants (0.2 for `h`, 0.05 for `m`) over-stated
+ *  intraday spacing by up to 72x, inflating every count-bounded window — and on
+ *  a paginating venue such as OKX that turned a 5-bar request into several pages
+ *  of fetched-then-discarded history. Daily/weekly keep a factor >1 so the
+ *  window still spans non-trading days when extrapolated from a bar count. */
 function perBarDays(interval: string): number {
   const match = interval.match(/^(\d+)([dwhm])$/)
   if (!match) return 1.6
@@ -91,18 +99,35 @@ function perBarDays(interval: string): number {
   switch (match[2]) {
     case 'd': return n * 1.6
     case 'w': return n * 7.5
-    case 'h': return n * 0.2
-    case 'm': return n * 0.05
+    case 'h': return n / 24
+    case 'm': return n / 1440
     default: return 1.6
   }
 }
 
-function startDateFor(opts: GetBarsOpts): string {
+/** Minimum calendar span for an inferred (count-bounded) window.
+ *
+ *  Continuous venues (crypto) trade every day, so the bar-count estimate is
+ *  enough on its own — a floor there only over-fetches, and on a paginating
+ *  source such as OKX each extra page is a network round-trip of history the
+ *  caller then discards. Calendar-bound venues (equity / forex / commodity)
+ *  close for weekends and holidays, so the window must span roughly a week or a
+ *  count-sized request can be starved below what the caller needs. `startDateFor`
+ *  renders a date-only `YYYY-MM-DD`, so one day is the smallest expressible
+ *  window. */
+function calendarFloorDays(assetClass: AssetClass | undefined): number {
+  return assetClass === 'crypto' ? 1 : 7
+}
+
+function startDateFor(opts: GetBarsOpts, assetClass?: AssetClass): string {
   if (opts.start) return opts.start
   const anchor = opts.asOf ?? opts.end
   const end = anchor ? new Date(anchor) : new Date()
   const days = opts.count != null
-    ? Math.max(7, Math.ceil(opts.count * perBarDays(opts.interval)) + 5)
+    // Ask for a few extra bars so a short or ragged tail cannot leave the caller
+    // one candle shy, then convert that bar budget into calendar time and clamp
+    // it to the asset-aware floor.
+    ? Math.max(calendarFloorDays(assetClass), Math.ceil((opts.count + 5) * perBarDays(opts.interval)))
     : getCalendarDays(opts.interval)
   const start = new Date(end)
   start.setDate(start.getDate() - days)
@@ -205,7 +230,10 @@ export function createBarService(deps: BarServiceDeps): BarService {
       throw new Error(`${provider} does not supply 4h bars; request 1h and aggregate locally, or choose a source supporting 4h`)
     }
     if (provider === 'fmp' && opts.interval === '1w') throw new Error('fmp does not supply 1w bars; request 1d and aggregate locally')
-    let start_date = startDateFor(opts)
+    // Asset class drives the inferred-window floor: crypto (OKX) is continuous
+    // and must stay tight to avoid pagination, while equity/forex (yfinance)
+    // needs a weekend-covering span. Passing it keeps the two honest.
+    let start_date = startDateFor(opts, assetClass)
     // Yahoo intraday retention is measured from now, not the requested anchor.
     // Only inferred windows may shrink; explicit dates must remain truthful.
     if (['yfinance', 'twse'].includes(provider) && ['1m', '5m', '15m', '30m', '1h'].includes(opts.interval)) {

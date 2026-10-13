@@ -154,6 +154,20 @@ describe('readMarketDataConfig', () => {
     expect(cfg.hub).toEqual({ enabled: true, baseUrl: 'https://traderhub.openalice.ai' })
   })
 
+  it('seeds the keyless okx crypto vendor so exchange-native symbols resolve by default', async () => {
+    fileNotFound()
+    const cfg = await readMarketDataConfig()
+    // Fresh homes get the exchange-native crypto source out of the box; the
+    // search capability filter keeps it out of equity fan-out.
+    expect(cfg.extraVendors).toEqual(['okx'])
+  })
+
+  it('respects an explicit extraVendors list from disk', async () => {
+    fileReturns({ extraVendors: ['eastmoney'] })
+    const cfg = await readMarketDataConfig()
+    expect(cfg.extraVendors).toEqual(['eastmoney'])
+  })
+
   it('parses enabled flag from file', async () => {
     fileReturns({ enabled: false })
     const cfg = await readMarketDataConfig()

@@ -29,6 +29,7 @@
 import { spawn } from 'node:child_process'
 import { createDecipheriv, randomUUID } from 'node:crypto'
 import { mkdir, readFile, watch } from 'node:fs/promises'
+import { homedir } from 'node:os'
 import { dirname, resolve } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import {
@@ -48,17 +49,30 @@ import {
   readProdPortsFile,
   resolveProdPortConfig,
 } from './prod-ports.mjs'
+import {
+  resolveProdAdvertisedHost,
+  resolveProdBindHost,
+  withProdAliceBindHost,
+} from './prod-bind.mjs'
 import { runtimeProcessSpec } from './runtime-process-spec.mjs'
 
+// Docker sets OPENALICE_HOME=/data explicitly (see Dockerfile). For a bare
+// local `pnpm start`, fall back to the same ~/.openalice home the dev
+// supervisor uses, so a source checkout shares one store across dev and prod.
 const DATA_HOME = process.env.OPENALICE_HOME
   ?? process.env.OPENALICE_USER_DATA_HOME // deprecated alias, one-release courtesy
-  ?? '/data'
+  ?? resolve(homedir(), '.openalice')
 const LAUNCHER_ROOT = process.env.AQ_LAUNCHER_ROOT ?? resolve(DATA_HOME, 'workspaces')
 const LAUNCHER = process.env.OPENALICE_LAUNCHER?.trim() || 'docker'
 const GUARDIAN_LAUNCHER = LAUNCHER.startsWith('guardian-') ? LAUNCHER : `guardian-${LAUNCHER}`
 const NODE_BINARY = process.env.OPENALICE_NODE_BINARY?.trim() || process.execPath
 const RUNTIME_EXECUTABLE = process.env.OPENALICE_RUNTIME_EXECUTABLE?.trim() || process.execPath
-const BIND_HOST = process.env.OPENALICE_BIND_HOST?.trim() || '127.0.0.1'
+const BIND_HOST = resolveProdBindHost(process.env, LAUNCHER)
+const ADVERTISED_HOST = resolveProdAdvertisedHost(BIND_HOST)
+// Private service listeners (MCP/CLI gateway, UTA, Connector). Separate from
+// the web bind host so widening the authenticated UI never widens these
+// unauthenticated backends. Children inherit this via process.env.
+const INTERNAL_BIND_HOST = process.env.OPENALICE_INTERNAL_BIND_HOST?.trim() || '127.0.0.1'
 const GUARDIAN_STARTED_AT = currentProcessStartedAt()
 const TAKEOVER = takeoverRequested()
 const SERVER_MODE = process.env.OPENALICE_SERVER_MODE?.trim() || 'foreground'
@@ -226,7 +240,7 @@ function runtimeStatus() {
       mode: SERVER_MODE,
     },
     endpoints: {
-      web: `http://${BIND_HOST}:${WEB_PORT}`,
+      web: `http://${ADVERTISED_HOST}:${WEB_PORT}`,
     },
     provider: {
       kind: RUNTIME_PROVIDER,
@@ -357,7 +371,7 @@ function spawnAlice() {
   })
   const child = spawn(spec.cmd, spec.args, {
     env: {
-      ...process.env,
+      ...withProdAliceBindHost(process.env, BIND_HOST),
       ...ALICE_PROJECT_ENV,
       OPENALICE_WEB_PORT: String(WEB_PORT),
       OPENALICE_MCP_PORT: String(MCP_PORT),
@@ -627,11 +641,11 @@ export async function startGuardianRuntime() {
   console.log(`[guardian/prod] data  → ${DATA_HOME}`)
   console.log(`[guardian/prod] project → ${ALICE_PROJECT.displayName} (${ALICE_PROJECT.id})`)
   console.log(`[guardian/prod] product → ${PROJECT_PRODUCT}`)
-  console.log(`[guardian/prod] UTA   → ${SKIP_UTA ? (PROJECT_PRODUCT === 'nano' ? 'disabled (NanoAlice)' : 'disabled (trading mode lite)') : UTA_URL}`)
-  console.log(`[guardian/prod] Connector → ${CONNECTOR_URL} (optional)`)
+  console.log(`[guardian/prod] UTA   → ${SKIP_UTA ? (PROJECT_PRODUCT === 'nano' ? 'disabled (NanoAlice)' : 'disabled (trading mode lite)') : `${UTA_URL} (bind ${INTERNAL_BIND_HOST})`}`)
+  console.log(`[guardian/prod] Connector → ${CONNECTOR_URL} (optional, bind ${INTERNAL_BIND_HOST})`)
   console.log(`[guardian/prod] Alice → http://${BIND_HOST}:${WEB_PORT}`)
-  console.log(`[guardian/prod] Tools → http://127.0.0.1:${MCP_PORT}/cli`)
-  console.log(`[guardian/prod] MCP   → optional on http://127.0.0.1:${MCP_PORT}/mcp`)
+  console.log(`[guardian/prod] Tools → http://${INTERNAL_BIND_HOST}:${MCP_PORT}/cli`)
+  console.log(`[guardian/prod] MCP   → optional on http://${INTERNAL_BIND_HOST}:${MCP_PORT}/mcp`)
   console.log(`[guardian/prod] flags → ${FLAG_PATH}, ${CONNECTOR_FLAG_PATH}`)
 
   guardianRuntimeLock = await acquireGuardianRuntime({

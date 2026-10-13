@@ -55,6 +55,23 @@ Source development remains ordinary:
 pnpm dev
 ```
 
+For a built source checkout, `pnpm build && pnpm start` runs the production
+Guardian, which starts Alice, configured UTA, and the optional Connector
+Service and serves the built UI from Alice's web port (normally `47331`). The
+web listener binds to `0.0.0.0` by default for source/Docker launches; installed
+CLI runtimes remain loopback-only. Only the authenticated web port is intended
+for remote access. MCP/CLI, UTA, and Connector stay on loopback. For a VPS,
+allow only the web port at the host/provider firewall and put it behind HTTPS;
+use `OPENALICE_BIND_HOST=127.0.0.1` to keep the web listener private.
+
+`OPENALICE_BIND_HOST` controls only the authenticated web port. The
+unauthenticated private listeners — the MCP/CLI gateway (`47332`), UTA
+(`47333`), and Connector (`47334`) — are governed by a separate
+`OPENALICE_INTERNAL_BIND_HOST`, which defaults to `127.0.0.1`. They are not
+widened by changing the web bind host. Set the internal host only when a
+firewall or private network already fronts the machine; those ports carry the
+full tool surface including trading, with no authentication layer.
+
 An explicit `--app-dir`, AliceProject source setting, or
 `OPENALICE_APP_HOME` can select a checkout for development. Normal installed
 startup does not clone source, install dependencies, or reconstruct a

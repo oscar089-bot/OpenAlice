@@ -5,6 +5,14 @@ export default defineConfig({
   format: ['cjs'],
   outDir: 'dist',
   target: 'es2023',
+  platform: 'node',
+  // esbuild merges every module into one scope, so a class whose name collides
+  // (e.g. abort-controller's AbortSignal) is renamed to AbortSignal2. Libraries
+  // that identify objects by constructor.name then break: node-fetch's
+  // isAbortSignal() compares proto.constructor.name to 'AbortSignal', so
+  // grammY's polling requests throw "Expected signal to be an instanceof
+  // AbortSignal". keepNames preserves the original class/function names.
+  keepNames: true,
   sourcemap: true,
   clean: true,
   splitting: false,
@@ -14,6 +22,11 @@ export default defineConfig({
   noExternal: [/.*/],
   outExtension: () => ({ js: '.cjs' }),
   esbuildOptions: (options) => {
-    options.conditions = ['openalice-source', ...(options.conditions ?? [])]
+    // Setting `conditions` REPLACES esbuild's platform defaults, dropping the
+    // implicit "node" condition. grammY then resolves to its browser build
+    // (out/web.mjs), which pulls in node-fetch's XMLHttpRequest build and
+    // fails every request under Node ("Network request failed"), surfacing as
+    // a misleading 30s Telegram readiness timeout. Always keep "node".
+    options.conditions = ['node', 'openalice-source', ...(options.conditions ?? [])]
   },
 })

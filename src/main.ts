@@ -39,6 +39,7 @@ import { withHubCalendars } from './domain/market-data/hub-data.js'
 import { getSDKExecutor, buildRouteMap, SDKEquityClient, SDKCryptoClient, SDKCurrencyClient, SDKEtfClient, SDKIndexClient, SDKDerivativesClient, SDKCommodityClient, SDKEconomyClient } from './domain/market-data/client/typebb/index.js'
 import type { EquityClientLike, CryptoClientLike, CurrencyClientLike, EtfClientLike, IndexClientLike, DerivativesClientLike, CommodityClientLike, EconomyClientLike } from './domain/market-data/client/types.js'
 import { buildSDKCredentials } from './domain/market-data/credential-map.js'
+import { resolveEnabledVendors } from './domain/market-data/enabled-vendors.js'
 import { createMarketSearchTools } from './tool/market.js'
 import { createVendorTools } from './tool/market-vendors.js'
 import { createQuantTools } from './tool/quant.js'
@@ -203,17 +204,23 @@ async function main() {
   const commodityCatalog = new CommodityCatalog()
   commodityCatalog.load()
 
-  // Default equity vendor + user-opted incremental vendors (eastmoney, …),
-  // de-duped, fanned out in searchBars; yfinance stays the always-on default.
-  // Resolved PER search (not a boot snapshot) so a vendor the agent enables at
-  // runtime via setMarketVendor — written to market-data.json, which the
-  // resolver re-reads per request — is live on the next search, no restart.
-  const getEquityVendors = async () => {
-    const md = await readMarketDataConfig()
-    return [...new Set([md.providers.equity, ...md.extraVendors])]
-  }
+  // Enabled-vendor resolution lives in one place (domain/market-data/enabled-vendors):
+  // enabled = per-class primary union extraVendors, then filtered to vendors that
+  // actually declare that class's search model. `extraVendors` is seeded with the
+  // keyless okx crypto feed, so exchange-native symbols (SOL-USDT) resolve out of
+  // the box — and the capability filter keeps okx (crypto-only) out of equity
+  // search and eastmoney/twse (equity-only) out of crypto search.
+  //
+  // Resolved PER search (not a boot snapshot) so a vendor the agent toggles at
+  // runtime via setMarketVendor — written to market-data.json, which the resolver
+  // re-reads per request — is live on the next search, no restart.
+  const vendorExecutor = getSDKExecutor()
+  const getEquityVendors = async () =>
+    resolveEnabledVendors(vendorExecutor, await readMarketDataConfig(), 'equity')
+  const getCryptoVendors = async () =>
+    resolveEnabledVendors(vendorExecutor, await readMarketDataConfig(), 'crypto')
 
-  const marketSearch = { symbolIndex, equityVendors: getEquityVendors, equityClient, cryptoClient, currencyClient, commodityCatalog }
+  const marketSearch = { symbolIndex, equityVendors: getEquityVendors, cryptoVendors: getCryptoVendors, equityClient, cryptoClient, currencyClient, commodityCatalog }
 
   // Federated bar layer — embedded vendor adapters + broker (UTA) OHLCV behind one
   // barId-keyed interface. Vendor branch live now; UTA branch lands with Phase 1.

@@ -419,3 +419,57 @@ describe('round-trip: create → update → comment → read back', () => {
     expect(comments.ok && comments.comments[0]).toMatchObject({ author: 'human', markdown: 'looks good' })
   })
 })
+
+/**
+ * The watcher pair guard through the REAL authoring path.
+ *
+ * The schema unit test proves the rule; this proves the model actually SEES the
+ * correction. `createIssue` / `updateIssueFields` are what the issue tool calls,
+ * and both return the schema message as `error`, which the tool hands back to
+ * the model verbatim — so a bad pair becomes a teachable rejection instead of a
+ * watcher that warns "symbol may be delisted" forever.
+ */
+describe('watch pair guard through authoring', () => {
+  const badWatch = {
+    pair: 'yfinance|SOLUSD',
+    assetClass: 'crypto',
+    timeframe: '15m',
+    rules: [{ type: 'candle_close', side: 'above', level: 200, timeframe: '15m' }],
+  }
+
+  it('createIssue rejects a barId pair and returns the correction', async () => {
+    const res = await createIssue(dir, {
+      id: 'bad-watch',
+      title: 'Watch SOL',
+      assignee: '@new-then-resume',
+      watch: badWatch,
+    })
+    expect(res.ok).toBe(false)
+    if (res.ok) return
+    expect(res.reason).toBe('invalid')
+    if (res.reason !== 'invalid') return
+    expect(res.error).toContain('pair')
+    expect(res.error).toContain('SOL-USDT')
+  })
+
+  it('updateIssueFields rejects a barId pair on an existing issue', async () => {
+    await createIssue(dir, { id: 'ok', title: 'Plain issue' })
+    const res = await updateIssueFields(dir, 'ok', { watch: badWatch })
+    expect(res.ok).toBe(false)
+    if (res.ok) return
+    expect(res.reason).toBe('invalid')
+    if (res.reason !== 'invalid') return
+    expect(res.error).toContain('exchange-native')
+  })
+
+  it('accepts a corrected bare-symbol pair and stores it', async () => {
+    await createIssue(dir, {
+      id: 'good-watch',
+      title: 'Watch SOL',
+      assignee: '@new-then-resume',
+      watch: { ...badWatch, pair: 'SOL-USDT' },
+    })
+    const { issue } = await readBack('good-watch')
+    expect(issue?.watch?.pair).toBe('SOL-USDT')
+  })
+})

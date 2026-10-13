@@ -245,9 +245,11 @@ function renderHeader(activity: OwnerChatActivity, frame: number, meta: string, 
 /**
  * The whole ephemeral line as PLAIN text.
  *
- * Activity only — no model prose. Narration belongs in the real reply, where it
- * is durable and in order. Mixing it into a slot that is overwritten on every
- * tick produced fragments that vanished mid-sentence.
+ * The header, the turn's latest COMPLETE narration line, then one line per
+ * failure. The narration is the model's own sentence introducing the current
+ * work — it rides this slot so the activity bar reads as progress rather than a
+ * bare counter, and because the transport EDITS the slot in place it must be a
+ * finished sentence, never the token stream (see the `narration` field).
  *
  * No markdown syntax at all: this variant is what `sendMessageDraft` falls back
  * to when rich drafts are unavailable, and a fallback that leaks literal
@@ -259,6 +261,7 @@ export function renderTurnActivity(
 ): string {
   const meta = activityToolMeta(activity).replace(/`/g, '')
   const lines = [renderHeader(activity, frame, meta)]
+  if (activity.narration) lines.push(activity.narration)
   const failures = renderFailedTools(activity.recentTools)
   if (failures) lines.push(failures)
   return lines.join('\n')
@@ -279,6 +282,10 @@ export function renderTurnActivityRich(
 ): string {
   const meta = activityToolMeta(activity)
   const lines = [renderHeader(activity, frame, '', true)]
+  // Narration sits between the status header and the tool meta, mirroring the
+  // desktop activity group where the model's sentence introduces the work and
+  // the tool list is the supporting detail beneath it.
+  if (activity.narration) lines.push('', activity.narration)
   if (meta) lines.push('', `> ${meta}`)
   const failures = renderFailedTools(activity.recentTools)
   if (failures) lines.push('', failures)

@@ -61,9 +61,9 @@ Panels — batch many computations in ONE call (avoids calling this tool N times
 The result can be a labeled dict { "label": expr, ... } or a list [ expr, ... ].
 Each entry must still be a single value (a scalar/record), max 50 entries. Use
 this for multi-timeframe / multi-symbol / multi-indicator at once, e.g.:
-  h1  = bars("yfinance|BTC-USD", "1h",  count=250, asset="crypto")
-  h4  = bars("yfinance|BTC-USD", "4h",  count=250, asset="crypto")
-  d1  = bars("yfinance|BTC-USD", "1d",  count=250, asset="crypto")
+  h1  = bars("okx|BTC-USDT", "1h",  count=250, asset="crypto")
+  h4  = bars("okx|BTC-USDT", "4h",  count=250, asset="crypto")
+  d1  = bars("okx|BTC-USDT", "1d",  count=250, asset="crypto")
   { "1h": rsi(h1.close, 14), "4h": rsi(h4.close, 14), "1d": rsi(d1.close, 14) }
 → { "1h": 53.2, "4h": 48.9, "1d": 61.4 }
 
