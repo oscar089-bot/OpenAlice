@@ -58,7 +58,7 @@ pnpm dev
 For a built source checkout, `pnpm build && pnpm start` runs the production
 Guardian, which starts Alice, configured UTA, and the optional Connector
 Service and serves the built UI from Alice's web port (normally `47331`). The
-web listener binds to `0.0.0.0` by default for source/Docker launches; installed
+web listener binds to `0.0.0.0` by default for source launches; installed
 CLI runtimes remain loopback-only. Only the authenticated web port is intended
 for remote access. MCP/CLI, UTA, and Connector stay on loopback. For a VPS,
 allow only the web port at the host/provider firewall and put it behind HTTPS;
@@ -71,6 +71,12 @@ unauthenticated private listeners — the MCP/CLI gateway (`47332`), UTA
 widened by changing the web bind host. Set the internal host only when a
 firewall or private network already fronts the machine; those ports carry the
 full tool surface including trading, with no authentication layer.
+
+`pnpm dev` serves the browser through the local Web relay, with Vite behind it
+for hot reload. The printed UI URL can switch between registered Machines and
+running AliceProjects. The Guardian-owned development AliceProject is included
+in the relay's local inventory without changing the saved Supervisor registry.
+Use `pnpm dev:no-relay` only to debug the older direct Vite-to-backend path.
 
 An explicit `--app-dir`, AliceProject source setting, or
 `OPENALICE_APP_HOME` can select a checkout for development. Normal installed
@@ -135,10 +141,10 @@ artifact does not absorb live broker SDKs. See [[docs/broker-packs.md]].
 Common entry points:
 
 ```bash
-openalice                 # Supervisor TUI
+openalice                 # Supervisor TUI and local Web relay
+openalice relay           # same Web relay without the TUI
 openalice up              # persistent background Runtime
 openalice status
-openalice open
 openalice down
 openalice run             # foreground Runtime
 openalice doctor
@@ -202,7 +208,8 @@ Routine verification is non-trading and uses isolated homes. Live-paper broker
 acceptance remains a separate explicit lane under [[docs/uta-live-testing.md]].
 
 Every native `dev` and versioned beta/stable candidate runs the artifact
-acceptance itself: the compiled CLI opens a captured platform browser command,
+acceptance itself: the compiled CLI starts its WebRelay, opens that local GUI
+through a captured platform browser command,
 launches two external OpenCode-adapter PTYs with distinct PIDs, sends independent
 input and resize messages, stops one Session, and proves the other remains
 interactive.

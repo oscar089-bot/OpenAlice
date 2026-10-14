@@ -151,6 +151,7 @@ function scannerFor(
     canRetryIssueRun?: ScheduleScannerDeps['canRetryIssueRun']
     isIssueRunning?: ScheduleScannerDeps['isIssueRunning']
     observeIssues?: ScheduleScannerDeps['observeIssues']
+    reconcileSessionRuntimeBindings?: ScheduleScannerDeps['reconcileSessionRuntimeBindings']
   } = {},
 ) {
   const dispatch = vi.fn(opts.dispatch ?? (async () => ({ taskId: 'run-1', resumeId: 'resume-new-worker-a1b2c3' })))
@@ -167,6 +168,7 @@ function scannerFor(
     dispatch,
     claimFreshSession: opts.claimFreshSession,
     observeIssues: opts.observeIssues,
+    reconcileSessionRuntimeBindings: opts.reconcileSessionRuntimeBindings,
     markers,
     logger: noopLogger,
     now: () => opts.now ?? NOW,
@@ -175,6 +177,16 @@ function scannerFor(
 }
 
 describe('ScheduleScanner', () => {
+  it('runs Session dossier reconciliation on the infrastructure scan tick', async () => {
+    const ws = await makeWs('w1', [])
+    const reconcileSessionRuntimeBindings = vi.fn(async () => undefined)
+    const { scanner } = scannerFor([ws], { reconcileSessionRuntimeBindings })
+
+    await scanner.scan()
+
+    expect(reconcileSessionRuntimeBindings).toHaveBeenCalledOnce()
+  })
+
   it('stamps connector cron metadata on scheduled and run-now phone-desk runs', async () => {
     const ws = await makeWs('w1', [{
       id: 'telegram-phone-desk',
@@ -186,7 +198,7 @@ describe('ScheduleScanner', () => {
     const { scanner, dispatch } = scannerFor([ws])
 
     await scanner.scan()
-    expect(vi.mocked(dispatch).mock.calls[0]?.[4]).toEqual({
+    expect(vi.mocked(dispatch).mock.calls[0]?.[5]).toEqual({
       kind: 'issue',
       workspaceId: 'w1',
       issueId: 'telegram-phone-desk',
@@ -197,7 +209,7 @@ describe('ScheduleScanner', () => {
     })
 
     await scanner.runIssueNow('w1', 'telegram-phone-desk')
-    expect(vi.mocked(dispatch).mock.calls[1]?.[4]).toEqual({
+    expect(vi.mocked(dispatch).mock.calls[1]?.[5]).toEqual({
       kind: 'issue',
       workspaceId: 'w1',
       issueId: 'telegram-phone-desk',
@@ -231,7 +243,7 @@ describe('ScheduleScanner', () => {
     })
 
     // The run carries the market cause, while remaining an ordinary Issue run.
-    expect(vi.mocked(dispatch).mock.calls[0]?.[4]).toEqual({
+    expect(vi.mocked(dispatch).mock.calls[0]?.[5]).toEqual({
       kind: 'issue',
       workspaceId: 'w1',
       issueId: 'btc-watch',
@@ -242,7 +254,7 @@ describe('ScheduleScanner', () => {
       },
     })
     // Ownership is re-read from disk: the exact @resumeId owner is resumed.
-    expect(vi.mocked(dispatch).mock.calls[0]?.[5]).toBe('resume-owner-a1b2c3')
+    expect(vi.mocked(dispatch).mock.calls[0]?.[6]).toBe('resume-owner-a1b2c3')
     // A market fire is not a calendar occurrence. Writing the marker would
     // silently skip the Issue's next scheduled slot.
     expect(markers.get('w1', 'btc-watch')).toBeUndefined()
@@ -270,10 +282,10 @@ describe('ScheduleScanner', () => {
     })
 
     // No concrete owner yet: the claim policy recruits one fresh Session.
-    expect(vi.mocked(dispatch).mock.calls[0]?.[5]).toBeUndefined()
+    expect(vi.mocked(dispatch).mock.calls[0]?.[6]).toBeUndefined()
     // The birth records the market cause, so the Session roster shows a watch
     // fire rather than an ordinary schedule.
-    expect(vi.mocked(dispatch).mock.calls[0]?.[9]).toMatchObject({
+    expect(vi.mocked(dispatch).mock.calls[0]?.[10]).toMatchObject({
       kind: 'issue',
       policy: 'new-then-resume',
       fire: 'watch',
@@ -309,7 +321,7 @@ describe('ScheduleScanner', () => {
     expect(dispatch).toHaveBeenCalledWith(
       ws,
       headlessAdapter,
-      'same exact prompt',
+      'same exact prompt', expect.objectContaining({ entry: expect.any(String), kind: expect.any(String) }),
       undefined,
       { kind: 'issue', workspaceId: 'w1', issueId: 'retry-me', retryOfTaskId: 'run-failed' },
       undefined,
@@ -348,7 +360,7 @@ describe('ScheduleScanner', () => {
     expect(limitedDispatch).toHaveBeenCalledWith(
       limited,
       headlessAdapter,
-      'go',
+      'go', expect.objectContaining({ entry: expect.any(String), kind: expect.any(String) }),
       45 * 60_000,
       { kind: 'issue', workspaceId: 'w1', issueId: 'limited' },
       undefined,
@@ -366,7 +378,7 @@ describe('ScheduleScanner', () => {
     expect(unlimitedDispatch).toHaveBeenCalledWith(
       unlimited,
       headlessAdapter,
-      'go',
+      'go', expect.objectContaining({ entry: expect.any(String), kind: expect.any(String) }),
       undefined,
       { kind: 'issue', workspaceId: 'w2', issueId: 'open' },
       undefined,
@@ -387,7 +399,7 @@ describe('ScheduleScanner', () => {
     expect(retryDispatch).toHaveBeenCalledWith(
       limited,
       headlessAdapter,
-      'go',
+      'go', expect.objectContaining({ entry: expect.any(String), kind: expect.any(String) }),
       45 * 60_000,
       { kind: 'issue', workspaceId: 'w1', issueId: 'limited' },
       undefined,
@@ -418,6 +430,7 @@ describe('ScheduleScanner', () => {
       ws,
       headlessAdapter,
       'wake',
+      expect.objectContaining({ kind: 'schedule', entry: 'issue-schedule' }),
       30 * 60_000,
       {
         kind: 'issue',
@@ -458,7 +471,7 @@ describe('ScheduleScanner', () => {
     expect(dispatch).toHaveBeenCalledWith(
       ws,
       headlessAdapter,
-      'go',
+      'go', expect.objectContaining({ entry: expect.any(String), kind: expect.any(String) }),
       undefined,
       { kind: 'issue', workspaceId: 'w1', issueId: 't1' },
       undefined,
@@ -513,7 +526,7 @@ describe('ScheduleScanner', () => {
     expect(dispatch).toHaveBeenCalledWith(
       ws,
       headlessAdapter,
-      'go',
+      'go', expect.objectContaining({ entry: expect.any(String), kind: expect.any(String) }),
       undefined,
       { kind: 'issue', workspaceId: 'w1', issueId: 'tuned' },
       undefined,
@@ -546,7 +559,7 @@ describe('ScheduleScanner', () => {
     expect(dispatch).toHaveBeenCalledWith(
       ws,
       headlessAdapter,
-      'go',
+      'go', expect.objectContaining({ entry: expect.any(String), kind: expect.any(String) }),
       undefined,
       { kind: 'issue', workspaceId: 'w1', issueId: 'native' },
       undefined,
@@ -579,7 +592,7 @@ describe('ScheduleScanner', () => {
     expect(dispatch).toHaveBeenCalledWith(
       ws,
       headlessAdapter,
-      'continue',
+      'continue', expect.objectContaining({ entry: expect.any(String), kind: expect.any(String) }),
       undefined,
       { kind: 'issue', workspaceId: 'w1', issueId: 'owned' },
       'resume-kind-owl-abc123',
@@ -604,7 +617,7 @@ describe('ScheduleScanner', () => {
     expect(dispatch).toHaveBeenCalledWith(
       ws,
       headlessAdapter,
-      'own this work from now on',
+      'own this work from now on', expect.objectContaining({ entry: expect.any(String), kind: expect.any(String) }),
       undefined,
       { kind: 'issue', workspaceId: 'w1', issueId: 'sticky' },
       undefined,
@@ -660,7 +673,7 @@ describe('ScheduleScanner', () => {
     expect(dispatch).toHaveBeenCalledWith(
       execution,
       headlessAdapter,
-      'revisit your report',
+      'revisit your report', expect.objectContaining({ entry: expect.any(String), kind: expect.any(String) }),
       undefined,
       { kind: 'issue', workspaceId: 'home', issueId: 'review-report' },
       'resume-peer-author',
@@ -688,7 +701,7 @@ describe('ScheduleScanner', () => {
     expect(dispatch).toHaveBeenCalledWith(
       ws,
       headlessAdapter,
-      'go',
+      'go', expect.objectContaining({ entry: expect.any(String), kind: expect.any(String) }),
       undefined,
       { kind: 'issue', workspaceId: 'w1', issueId: 'sched' },
       undefined,
@@ -715,7 +728,7 @@ describe('ScheduleScanner', () => {
     expect(dispatch).toHaveBeenCalledWith(
       ws,
       headlessAdapter,
-      'scan movers',
+      'scan movers', expect.objectContaining({ entry: expect.any(String), kind: expect.any(String) }),
       undefined,
       { kind: 'issue', workspaceId: 'w1', issueId: 't1' },
       undefined,
@@ -914,15 +927,15 @@ describe('comment owner handoff', () => {
     const { scanner, dispatch, markers } = scannerFor([ws], { claimFreshSession })
     await scanner.runIssueComment({ workspaceId: 'w1', issueId: 'desk', prompt: 'Hello', commentId: 'c1' })
     const first = dispatch.mock.calls[0]
-    expect(first[4]).toBeUndefined() // never a cron turn: no no-reply suppression
-    expect(first[5]).toBeUndefined()
-    expect(first[6]).toMatchObject({ subject: { relation: 'owner', commentId: 'c1' } })
-    expect(first[7]).toMatchObject({ credentialSource: 'native', model: 'gpt-5.6-sol', reasoningEffort: 'medium' })
-    expect(first[9]).toMatchObject({ kind: 'issue', fire: 'comment', policy: 'new-then-resume' })
+    expect(first[5]).toBeUndefined() // never a cron turn: no no-reply suppression
+    expect(first[6]).toBeUndefined()
+    expect(first[7]).toMatchObject({ subject: { relation: 'owner', commentId: 'c1' } })
+    expect(first[8]).toMatchObject({ credentialSource: 'native', model: 'gpt-5.6-sol', reasoningEffort: 'medium' })
+    expect(first[10]).toMatchObject({ kind: 'issue', fire: 'comment', policy: 'new-then-resume' })
     expect(claimFreshSession).toHaveBeenCalledTimes(1)
     expect(markers.get('w1', 'desk')).toBeUndefined()
     await scanner.runIssueComment({ workspaceId: 'w1', issueId: 'desk', prompt: 'Again', commentId: 'c2' })
-    expect(dispatch.mock.calls[1][5]).toBe('resume-new-worker-a1b2c3')
+    expect(dispatch.mock.calls[1][6]).toBe('resume-new-worker-a1b2c3')
     expect(claimFreshSession).toHaveBeenCalledTimes(1)
   })
 
@@ -942,4 +955,24 @@ describe('comment owner handoff', () => {
     release()
     await comment
   })
+})
+
+it('keeps ticking and dispatching other Issues while one admission awaits approval', async () => {
+  const ws = await makeWs('approval', [
+    { id: 'a', title: 'Waiting', when: { kind: 'every', every: '1m' }, what: 'A' },
+    { id: 'b', title: 'Independent', when: { kind: 'every', every: '1m' }, what: 'B' },
+  ])
+  let approve!: (value: { taskId: string; resumeId: string }) => void
+  const gate = new Promise<{ taskId: string; resumeId: string }>(resolve => { approve = resolve })
+  const { scanner, dispatch, markers } = scannerFor([ws], {
+    dispatch: async (_ws, _adapter, _prompt, _origin, _timeout, trigger) => trigger?.kind === 'issue' && trigger.issueId === 'a' ? gate : { taskId: 'independent', resumeId: 'independent' },
+  })
+  await scanner.scan(false)
+  await vi.waitFor(() => expect(dispatch).toHaveBeenCalledTimes(2))
+  await vi.waitFor(() => expect(markers.get(ws.id, 'b')).toBe(NOW))
+  await scanner.scan(false)
+  expect(dispatch).toHaveBeenCalledTimes(2)
+  approve({ taskId: 'approved', resumeId: 'approved' })
+  await scanner.waitForDispatches()
+  expect(markers.get(ws.id, 'a')).toBe(NOW)
 })

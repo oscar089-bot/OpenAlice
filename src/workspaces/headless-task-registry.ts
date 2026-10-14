@@ -138,6 +138,7 @@ export interface HeadlessTaskRecord {
   launchErrorCode?: HeadlessLaunchErrorCode
   exitCode?: number | null
   signal?: string | null
+  interruptionReason?: string
   killed?: boolean
   error?: string
   /** Watchdog policy recorded at dispatch time. A positive number is the armed
@@ -284,6 +285,7 @@ export class HeadlessTaskRegistry {
         | 'launchErrorCode'
         | 'exitCode'
         | 'signal'
+        | 'interruptionReason'
         | 'killed'
         | 'error'
         | 'output'

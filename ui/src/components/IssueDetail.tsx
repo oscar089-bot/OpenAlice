@@ -1097,6 +1097,7 @@ function PropertiesRail({
 }) {
   const { t } = useTranslation()
   const { openHeadlessRun } = useWorkspaces()
+  const openAccounts = useWorkspace((state) => state.openOrFocus)
   const [confirmAction, setConfirmAction] = useState<'run' | 'retry' | null>(null)
   const [pendingCapability, setPendingCapability] = useState<{
     from: string
@@ -1281,7 +1282,7 @@ function PropertiesRail({
                     bound={Boolean(ownerResumeId)}
                     boundRuntime={ownerSession?.runtime}
                     onConfigureProvider={() => {
-                      if (effectiveAgent) onConfigureAgent(effectiveAgent as AgentId)
+                      openAccounts({ kind: 'settings', params: { category: 'ai-provider' } })
                     }}
                     onApply={(patch, capability) => {
                       if (!ownerResumeId) {

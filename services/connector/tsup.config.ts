@@ -1,3 +1,4 @@
+import { resolve } from 'node:path'
 import { defineConfig } from 'tsup'
 
 export default defineConfig({
@@ -28,5 +29,14 @@ export default defineConfig({
     // fails every request under Node ("Network request failed"), surfacing as
     // a misleading 30s Telegram readiness timeout. Always keep "node".
     options.conditions = ['node', 'openalice-source', ...(options.conditions ?? [])]
+    // grammY's Node shim imports the legacy `abort-controller` polyfill.
+    // Bundling it makes esbuild rename its AbortSignal class, which breaks
+    // node-fetch@2.7.0's `constructor.name === "AbortSignal"` check and fails
+    // every grammY call. Point it at Node's native global instead (runtime is
+    // Node >= 22). See src/shims/abort-controller.ts.
+    options.alias = {
+      ...(options.alias ?? {}),
+      'abort-controller': resolve(import.meta.dirname, 'src/shims/abort-controller.ts'),
+    }
   },
 })
