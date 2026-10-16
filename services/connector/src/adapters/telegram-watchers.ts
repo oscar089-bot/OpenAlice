@@ -151,7 +151,9 @@ export function formatTelegramWatcherBoard(
     ` \u00b7 refresh ${input.refreshSeconds}s`,
   ].join('')
 
-  const body = isExpanded ? `${rendered.card}\n\n${rendered.detail}` : rendered.card
+  // Expanded replaces the compact card with the full detail panel; it never
+  // renders both, which would repeat the header/status lines above the detail.
+  const body = isExpanded ? rendered.detail : rendered.card
   const html = truncate([header, '', toTelegramBoardHtml(body)].join('\n'), TELEGRAM_BOARD_TEXT_MAX)
 
   // Previous only exists past the first watcher, Next only before the last, so

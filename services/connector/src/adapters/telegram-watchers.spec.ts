@@ -155,11 +155,17 @@ describe('formatTelegramWatcherBoard', () => {
     ])
   })
 
-  it('collapsed shows only the card, expanded adds the detail panel', () => {
+  it('collapsed shows only the card, expanded replaces it with the detail panel', () => {
     const collapsed = board({ index: 1 })
     expect(collapsed.html).not.toContain('Trigger progress')
+    // Collapsed renders the compact card header for ETHUSDT.
+    expect(collapsed.html).toContain('\u003cb\u003eETHUSDT\u003c/b\u003e')
     const expanded = board({ index: 1, expanded: new Set(['w-2']) })
     expect(expanded.html).toContain('Trigger progress')
+    // Expanded REPLACES the card. The compact header must not also appear, or
+    // the operator sees the whole card stacked above the full detail panel.
+    expect(expanded.html).not.toContain('\u003cb\u003eETHUSDT\u003c/b\u003e')
+    expect(expanded.html).toContain('\u003cb\u003eETHUSDT Watcher\u003c/b\u003e')
     expect(expanded.actions[0]?.[0]).toEqual({ text: '\uD83D\uDD3C Collapse', data: 'wb:t' })
   })
 
