@@ -39,6 +39,8 @@ export interface ConnectorAdapterContext {
   sendTest(connectorId: string): Promise<string>
   /** Stop this adapter's in-flight phone-desk Agent turn, if any. */
   stopDeskRun?(): Promise<{ stopped: boolean; taskId?: string }>
+  /** Reset this adapter's phone desk so the next message recruits a fresh Session. */
+  newDeskSession?(): Promise<{ started: boolean; reason?: 'running' | 'unavailable' }>
   forwardOwnerText(input: { text: string; userId: string; chatId?: string; eventId?: string }): Promise<void>
   enqueueArtifactRequest(input: { entryId: string; docIndex: number }): Promise<string>
   enqueueUtaRequest(input: {

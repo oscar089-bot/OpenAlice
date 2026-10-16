@@ -114,6 +114,7 @@ export const TELEGRAM_CONNECTOR_DEFINITION: ConnectorDefinition = {
       { name: 'settings', description: 'Change Inbox push for this chat.' },
       { name: 'model', description: 'Choose Session credential, model and effort.' },
       { name: 'stop', description: 'Stop the Agent reply that is currently running.' },
+      { name: 'new', description: 'Start a fresh Session for this chat.' },
       { name: 'uta', description: 'Review and approve pending trades.' },
       { name: 'watchers', description: 'Open the live watcher board.' },
       { name: 'watcher', description: 'Alias for /watchers.' },

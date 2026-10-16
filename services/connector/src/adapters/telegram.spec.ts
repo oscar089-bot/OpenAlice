@@ -701,6 +701,36 @@ it('reports when the owner has nothing to stop', async () => {
   } finally { await adapter.stop() }
 })
 
+it('starts a fresh desk Session only for the linked owner', async () => {
+  startMock.mockImplementation(async ({ onStart }) => { onStart?.() })
+  const adapter = new TelegramConnectorAdapter()
+  const newDeskSession = vi.fn(async () => ({ started: true, previousResumeId: 'resume-old' }))
+  try {
+    await adapter.start({ enabled: true, settings: { botToken: 'test-token', ownerUserId: '42', chatId: '42' } }, { ...context(), newDeskSession })
+    await vi.waitFor(() => expect(handlers.has('new')).toBe(true))
+    const reply = vi.fn(async () => ({ message_id: 9 }))
+    const ctx = { chat: { id: 42, type: 'private' }, from: { id: 77 }, reply }
+    await handlers.get('new')!(ctx)
+    expect(newDeskSession).not.toHaveBeenCalled()
+    ctx.from.id = 42
+    await handlers.get('new')!(ctx)
+    expect(newDeskSession).toHaveBeenCalledTimes(1)
+    expect(reply).toHaveBeenCalledWith(expect.stringContaining('Fresh Session ready'))
+  } finally { await adapter.stop() }
+})
+
+it('refuses to start a new desk Session while a reply is running', async () => {
+  startMock.mockImplementation(async ({ onStart }) => { onStart?.() })
+  const adapter = new TelegramConnectorAdapter()
+  const reply = vi.fn(async () => ({ message_id: 10 }))
+  try {
+    await adapter.start({ enabled: true, settings: { botToken: 'test-token', ownerUserId: '42', chatId: '42' } }, { ...context(), newDeskSession: async () => ({ started: false, reason: 'running' }) })
+    await vi.waitFor(() => expect(handlers.has('new')).toBe(true))
+    await handlers.get('new')!({ chat: { id: 42, type: 'private' }, from: { id: 42 }, reply })
+    expect(reply).toHaveBeenCalledWith('An Agent reply is running. Use /stop first, then /new.')
+  } finally { await adapter.stop() }
+})
+
 // "message is not modified" is a success Telegram reports as an error.
 function notModifiedError() {
   return new GrammyError("Call to 'editMessageText' failed!", {

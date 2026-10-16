@@ -63,6 +63,7 @@ export interface DeliveryManagerOptions {
   sessionModel?(connectorId: string, request: ConnectorModelRequest): Promise<ConnectorModelPanel>
   /** Owner-facing stop for one connector's in-flight phone-desk turn. */
   stopDeskRun?(connectorId: string): Promise<{ stopped: boolean; taskId?: string }>
+  newDeskSession?(connectorId: string): Promise<{ started: boolean; previousResumeId?: string }>
   readWorkspaceFile?(workspaceId: string, path: string): Promise<ConnectorAttachment>
   registry: ConnectorRegistry
   config: ConnectorConfig
@@ -922,6 +923,18 @@ export class DeliveryManager {
       getServiceStatus: () => this.health().status,
       sendTest: (connectorId) => this.sendTest(connectorId),
       ...(this.options.stopDeskRun ? { stopDeskRun: () => this.options.stopDeskRun!(id) } : {}),
+      ...(this.options.newDeskSession
+        ? {
+            newDeskSession: async () => {
+              try {
+                const result = await this.options.newDeskSession!(id)
+                return result.started ? { started: true } : { started: false, reason: 'running' as const }
+              } catch {
+                return { started: false, reason: 'unavailable' as const }
+              }
+            },
+          }
+        : {}),
       forwardOwnerText: async (input) => {
         await this.acceptInbound({
           connectorId: id,

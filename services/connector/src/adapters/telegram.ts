@@ -817,6 +817,17 @@ export class TelegramConnectorAdapter implements ConnectorAdapter {
         ? 'Stopping the Agent reply now.'
         : 'No Agent reply is running for this chat.')
     })
+    context.commands.register('new', async ({ userId, reply }) => {
+      if (!this.isOwner(userId)) return reply('This command is only available to the linked owner.')
+      if (!context.newDeskSession) return reply('Starting a new Session is unavailable. Update OpenAlice.')
+      const result = await context.newDeskSession()
+      if (result.started) {
+        return reply('Fresh Session ready. Your next message starts a new conversation. The previous Session is kept and still reachable in OpenAlice.')
+      }
+      await reply(result.reason === 'running'
+        ? 'An Agent reply is running. Use /stop first, then /new.'
+        : 'Could not start a new Session. Check OpenAlice logs.')
+    })
   }
 
   private async presentInbox(

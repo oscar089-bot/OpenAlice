@@ -173,7 +173,7 @@ import {
   BUILTIN_CONNECTOR_DEFINITIONS,
   connectorDefinitionHasCapability,
 } from '@traderalice/connector-protocol';
-import { sessionSignature } from './session-signature.js';
+import { NEW_THEN_RESUME_ASSIGNEE, sessionSignature } from './session-signature.js';
 import { issueRunFailure } from './issues/run-failure.js';
 import type { IInboxStore } from '@/core/inbox-store.js';
 import { OfficeDayStore } from '@/core/office-day-store.js';
@@ -607,6 +607,12 @@ export interface WorkspaceService {
   disableConnectorDesk(connectorId: string): Promise<ConnectorDesk | null>;
   /** Stop the in-flight owner-chat turn for this connector's phone desk. */
   stopConnectorDeskRun(connectorId: string): Promise<{ stopped: boolean; taskId?: string }>;
+  /**
+   * Reset the phone desk so the next inbound message recruits a fresh Session.
+   * The previous Session stays active and reachable; only this desk's owner
+   * pointer changes. Refused while a run is in flight.
+   */
+  newConnectorDeskSession(connectorId: string): Promise<{ started: boolean; previousResumeId?: string }>;
   telegramConnectorDesk(): Promise<ConnectorDesk | null>;
   createTelegramConnectorDesk(wsId: string): Promise<ConnectorDesk>;
   updateTelegramConnectorDesk(patch: {
@@ -3717,6 +3723,37 @@ const WATCH_ALERT_CONNECTORS: string[] = ['discord', 'telegram'];
     });
     return { stopped: true, taskId: task.taskId };
   };
+  const newConnectorDeskSession = async (
+    connectorId: string,
+  ): Promise<{ started: boolean; previousResumeId?: string }> => {
+    const desk = await connectorDeskOp(connectorId);
+    if (!desk) throw new Error('Chat not found');
+    const workspace = registry.get(desk.wsId);
+    if (!workspace) throw new Error('Chat not found');
+    // Never re-home a desk mid-turn: the running Session still owns this chat
+    // until it finishes. The caller surfaces this as "a reply is in progress".
+    if (findRunningDeskTask(headlessTasks.list({ status: 'running' }), desk)) {
+      return { started: false };
+    }
+    const previousResumeId = issueAssigneeResumeId(desk.issue.assignee) ?? undefined;
+    const updated = await updateIssueFields(workspace.dir, desk.issue.id, {
+      assignee: NEW_THEN_RESUME_ASSIGNEE,
+    });
+    if (!updated.ok) {
+      throw new Error(
+        updated.reason === 'invalid'
+          ? updated.error
+          : 'This chat could not start a new Session',
+      );
+    }
+    launcherLogger.info('connector.desk_session_reset', {
+      connectorId,
+      wsId: desk.wsId,
+      issueId: desk.issue.id,
+      previousResumeId,
+    });
+    return { started: true, ...(previousResumeId ? { previousResumeId } : {}) };
+  };
 
   return {
     config,
@@ -3789,6 +3826,7 @@ const WATCH_ALERT_CONNECTORS: string[] = ['discord', 'telegram'];
     updateConnectorDesk: updateConnectorDeskOp,
     disableConnectorDesk: disableConnectorDeskOp,
     stopConnectorDeskRun,
+    newConnectorDeskSession,
     telegramConnectorDesk: async () => connectorDeskOp('telegram'),
     createTelegramConnectorDesk: async (wsId: string) => createConnectorDeskOp('telegram', wsId),
     updateTelegramConnectorDesk: async (patch) => updateConnectorDeskOp('telegram', patch),

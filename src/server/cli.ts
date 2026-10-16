@@ -1,5 +1,6 @@
 import { registerConnectorModelRoutes } from './connector-model.js'
 import { registerConnectorStopRoutes } from './connector-stop.js'
+import { registerConnectorSessionRoutes } from './connector-session.js'
 import { registerMarketReferenceRoute } from './market-reference.js'
 import { registerWorkspaceFileRoutes } from './workspace-files.js'
 import { registerProjectCliRoutes } from './project-cli.js'
@@ -72,6 +73,7 @@ export function registerCliRoutes(app: Hono, deps: CliGatewayDeps, manifestOnly 
   if (!manifestOnly) {
     registerConnectorModelRoutes(app, getWorkspaceService)
     registerConnectorStopRoutes(app, getWorkspaceService)
+    registerConnectorSessionRoutes(app, getWorkspaceService)
     registerProjectCliRoutes(app, toolCenter)
     registerMarketReferenceRoute(app, toolCenter)
     registerWorkspaceFileRoutes(app, id => getWorkspaceService()?.registry.get(id))
