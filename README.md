@@ -26,6 +26,15 @@ OpenAlice connects the agents you already use to market data, dedicated research
 workspaces, scheduled tasks, and trading accounts. Work with one agent or several;
 your files, research history, and follow-ups stay in place between sessions.
 
+> [!NOTE]
+> **This is a personal fork.** [`oscar089-bot/OpenAlice`](https://github.com/oscar089-bot/OpenAlice)
+> tracks upstream [`TraderAlice/OpenAlice`](https://github.com/TraderAlice/OpenAlice)
+> and adds contributor work on top — a persisted watcher market-snapshot layer,
+> a connector pending-delivery store, an OKX keyless crypto provider, and a
+> Telegram `/new` command that starts a fresh phone-desk Session on demand.
+> See [CHANGELOG.md](./CHANGELOG.md) under *Contributor additions*.
+> Upstream remains the source of truth for the product and its releases.
+
 ## Get Started
 
 [Download the desktop app](https://github.com/TraderAlice/OpenAlice/releases/latest)

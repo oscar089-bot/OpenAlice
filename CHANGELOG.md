@@ -4,6 +4,19 @@ All notable changes to OpenAlice will be documented in this file.
 
 ## [Unreleased]
 
+### ⭐ Contributor additions (Oscar089-bot)
+
+- **watch**: market snapshot provider + persisted watcher state, so a
+  candle-close condition survives restart and never replays history.
+- **connector**: pending-delivery store so an interrupted agent reply is
+  retried instead of lost.
+- **market-data**: OKX provider for keyless crypto quotes and K-lines.
+- **connector**: Telegram `/new` — start a fresh phone-desk Session on demand.
+  The previous Session stays active and reachable by its `resumeId`.
+- **fix**: connector desk, headless delivery, schedule scanner, and
+  unbound-claim repair.
+- **guardian**: raise dev readiness timeouts for slow boots.
+
 ### 🏗️ Architecture — UTA-split v1
 
 Split the trading domain into a dedicated UTA service co-located with
