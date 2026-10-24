@@ -358,6 +358,17 @@ const watcherBoardStateSchema = z.object({
   lastChecked: z.string().nullable().optional(),
   lastPrice: z.number().finite().nullable().optional(),
   lastMarketTimestamp: z.string().nullable().optional(),
+  /** Which source served `lastPrice` — `tv-feed` (live push) or `vendor`
+   *  (delayed). Lets the card state the truth instead of leaving an operator or
+   *  an agent to guess from a bare number. */
+  lastPriceSource: z
+    .object({
+      kind: z.enum(['tv-feed', 'vendor']),
+      ref: z.string(),
+      fellBack: z.boolean().optional(),
+    })
+    .nullable()
+    .optional(),
   lastConfirmedCandle: watcherBoardCandleSchema.nullable().optional(),
   previousConfirmedCandle: watcherBoardCandleSchema.nullable().optional(),
   terminal: z.boolean().optional(),

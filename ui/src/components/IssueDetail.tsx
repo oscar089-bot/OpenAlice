@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { TFunction } from 'i18next'
 import { useTranslation } from 'react-i18next'
-import { Activity, ArrowLeft, Check, ChevronRight, Clock, Cpu, Crosshair, Eye, Gauge, Hash, History, Inbox, KeyRound, ListChecks, LoaderCircle, MapPin, MessageSquare, Play, Radio, RefreshCw, RotateCcw, Settings, ShieldAlert, SlidersHorizontal, Target, Timer, TrendingUp, UserRound, X, Zap } from 'lucide-react'
+import { Activity, ArrowLeft, Check, ChevronRight, Clock, Cpu, Crosshair, Eye, Gauge, Hash, History, Inbox, KeyRound, ListChecks, LoaderCircle, MapPin, MessageSquare, Play, Radio, RefreshCw, RotateCcw, Settings, ShieldAlert, SlidersHorizontal, Target, Timer, Trash2, TrendingUp, UserRound, X, Zap } from 'lucide-react'
 
 import {
   distanceToTrigger,
@@ -36,6 +36,7 @@ import type {
 import { DEFAULT_ISSUE_COMMENT_PROMPT, ISSUE_TIMEOUTS, issuesApi } from '../api/issues'
 
 import {
+  deleteSessionByResumeId,
   getAgentReadiness,
   listAgentCredentials,
   updateResumeRuntime,
@@ -1684,6 +1685,9 @@ function mutationFieldLabel(field: string, t: TFunction): string {
 }
 
 function unknownOriginLabel(reason: string, t: TFunction): string {
+  // Emitted when deleting a Session re-points the watchers it owned. It is a
+  // system action, not an unknown author, so it gets its own sentence.
+  if (reason === 'session-deleted') return t('issues.detail.watcherReassigned')
   if (reason === 'direct-file-edit') return t('issues.detail.directFileEdit')
   if (reason === 'concurrent-workspace-edit') return t('issues.detail.concurrentEditUnknown')
   return t('issues.detail.unknownOrigin', { reason: reason.replaceAll('-', ' ') })
@@ -1936,6 +1940,107 @@ export function IssueActivity({
         assignee={assignee}
         onPosted={onPosted}
       />
+    </section>
+  )
+}
+
+/**
+ * Product Sessions owned by this Workspace, newest first. Connector desk
+ * Sessions are excluded from the shared roster, so this is the only place an
+ * operator can see the previous conversation after a phone-desk `/new` and
+ * remove one they no longer want.
+ */
+function IssueSessionsSection({
+  wsId,
+  sessions,
+  onChanged,
+}: {
+  wsId: string
+  sessions: readonly WorkspaceSessionDirectoryEntry[]
+  onChanged: () => Promise<void>
+}) {
+  const { t } = useTranslation()
+  const [pending, setPending] = useState<WorkspaceSessionDirectoryEntry | null>(null)
+  const [working, setWorking] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const visible = useMemo(
+    () => sessions
+      .filter((session) => (session.lifecycle ?? 'active') !== 'retired')
+      .filter((session) => (session.presence ?? 'active') !== 'deleted')
+      .slice()
+      .sort((left, right) => right.updatedAt - left.updatedAt),
+    [sessions],
+  )
+  if (visible.length === 0) return null
+  return (
+    <section className="mt-10 scroll-mt-20 border-t border-border/60 pt-6">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <h2 className="text-sm font-semibold text-foreground">{t('issues.detail.sessions')}</h2>
+        <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] leading-[15px] text-muted-foreground">{visible.length}</span>
+      </div>
+      <ul className="space-y-2">
+        {visible.map((session) => {
+          const title = session.displayName || session.presentationTitle || ''
+          const label = title || session.resumeId
+          return (
+            <li
+              key={session.resumeId}
+              className="flex min-w-0 items-center gap-3 rounded-lg border border-border/60 bg-background/30 px-3 py-2.5"
+            >
+              <div className="min-w-0 flex-1">
+                {title && (
+                  <p className="truncate text-[13px] font-medium text-foreground" title={title}>{title}</p>
+                )}
+                <p className={`truncate font-mono text-[10.5px] text-muted-foreground ${title ? 'mt-0.5' : ''}`}>
+                  {session.agent} · {session.resumeId}
+                  {session.active ? ` · ${t('issues.detail.sessionRunning')}` : ''}
+                </p>
+              </div>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-10 w-10 shrink-0 text-muted-foreground/55 hover:bg-destructive/10 hover:text-destructive sm:h-8 sm:w-8"
+                disabled={working}
+                title={t('issues.detail.deleteSessionAria', { name: label })}
+                aria-label={t('issues.detail.deleteSessionAria', { name: label })}
+                onClick={() => { setError(null); setPending(session) }}
+              >
+                <Trash2 size={14} strokeWidth={1.75} />
+              </Button>
+            </li>
+          )
+        })}
+      </ul>
+      {error && <p role="alert" className="mt-2 text-xs leading-snug text-destructive">{error}</p>}
+      {pending && (
+        <ConfirmDialog
+          title={t('issues.detail.deleteSessionTitle')}
+          message={t('issues.detail.deleteSessionMessage', {
+            name: pending.displayName || pending.presentationTitle || pending.resumeId,
+          })}
+          confirmLabel={t('issues.detail.deleteSessionConfirm')}
+          cancelLabel={t('common.cancel')}
+          workingLabel={t('issues.detail.deletingSession')}
+          variant="danger"
+          onConfirm={async () => {
+            setWorking(true)
+            try {
+              await deleteSessionByResumeId(wsId, pending.resumeId)
+              await onChanged()
+              setPending(null)
+            } catch (cause) {
+              // A busy Session is a normal, actionable refusal — surface it on
+              // the page instead of trapping it behind the closed dialog.
+              setError(cause instanceof Error ? cause.message : String(cause))
+              setPending(null)
+            } finally {
+              setWorking(false)
+            }
+          }}
+          onClose={() => { if (!working) setPending(null) }}
+        />
+      )}
     </section>
   )
 }
@@ -2390,6 +2495,13 @@ export function IssueDetail({
               })
             }}
           />
+          {issue.connectorDesk && (
+            <IssueSessionsSection
+              wsId={wsId}
+              sessions={sessionDirectory}
+              onChanged={refreshSessions}
+            />
+          )}
           <InboxReportsSection reports={inboxReports} onOpen={gotoInbox} />
         </div>
       </main>

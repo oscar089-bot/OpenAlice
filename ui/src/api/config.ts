@@ -105,6 +105,23 @@ export const configApi = {
     return res.json()
   },
 
+  /**
+   * Probe an external MCP server BEFORE adding it.
+   *
+   * Spawns the command, lists its tools, and tears it down. Returns `ok:false`
+   * with a message rather than throwing, so the form can show the failure in
+   * place.
+   */
+  async testExternalMcpServer(input: {
+    command: string
+    args: string[]
+    env: Record<string, string>
+    cwd?: string
+  }): Promise<ExternalMcpProbeResult> {
+    const res = await fetch('/api/config/mcp/test', { method: 'POST', headers, body: JSON.stringify(input) })
+    return res.json()
+  },
+
   // ============ Default Workspace Credentials (per-agent) ============
 
   async getWorkspaceCredentialDefaults(): Promise<WorkspaceCredentialDefaultsResponse> {
@@ -126,6 +143,14 @@ export const configApi = {
     return res.json()
   },
 
+}
+
+/** Result of probing a third-party MCP server before adding it. */
+export interface ExternalMcpProbeResult {
+  ok: boolean
+  tools?: Array<{ name: string; description?: string }>
+  server?: { name?: string; version?: string }
+  error?: string
 }
 
 /** A per-agent default credential seeded into new workspaces. */

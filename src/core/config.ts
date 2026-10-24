@@ -364,11 +364,64 @@ const marketDataSchema = z.object({
   }).default({ enabled: true, baseUrl: 'https://traderhub.openalice.ai' }),
 })
 
-/** MCP server config — exports OpenAlice's ToolCenter to MCP clients. */
+/** MCP server config — exports OpenAlice's ToolCenter to MCP clients, and
+ *  optionally CONNECTS to external MCP servers as a client. */
+const externalMcpServerSchema = z.object({
+  /** Stable id used for tool-name prefixing and removal. */
+  id: z.string().min(1),
+  /** Display label only — never part of the tool name. */
+  name: z.string().min(1),
+  /** Executable to spawn, e.g. "uv" or "npx". Resolved via PATH. */
+  command: z.string().min(1),
+  args: z.array(z.string()).default([]),
+  /** Extra environment variables for the child process. */
+  env: z.record(z.string(), z.string()).default({}),
+  cwd: z.string().optional(),
+  enabled: z.boolean().default(true),
+})
+
+export type ExternalMcpServerConfig = z.infer<typeof externalMcpServerSchema>
+
 const mcpSchema = z.object({
   enabled: z.boolean().default(false),
   port: z.number().int().positive().default(3001),
-}).default({ enabled: false, port: 3001 })
+  /** External MCP servers Alice consumes as a CLIENT. Empty by default: no
+   *  process is spawned until the user adds one in Settings → MCP Server. */
+  externalServers: z.array(externalMcpServerSchema).default([]),
+}).default({ enabled: false, port: 3001, externalServers: [] })
+
+/**
+ * TradingView realtime feed (`services/tv-feed`).
+ *
+ * When enabled and connected, watchers for the listed asset classes read the
+ * live push feed instead of the delayed federated bar layer. Disabled by
+ * default, and every consumer falls back to `barService` on any failure — so an
+ * install that never starts the service behaves exactly as before.
+ */
+const tvFeedSchema = z.object({
+  /** On by default so `pnpm dev` / `pnpm start` bring the feed up with the
+   *  other services. If the service has never been built, the supervisor logs a
+   *  one-line hint and skips it — watchers then use the bar layer as before. */
+  enabled: z.boolean().default(true),
+  /** Spawn `services/tv-feed` alongside Alice. Only meaningful when `enabled`. */
+  autoStart: z.boolean().default(true),
+  /** WebSocket URL of the local tv-feed service. */
+  url: z.string().default('ws://127.0.0.1:8081'),
+  /**
+   * Address the spawned service binds. Defaults to loopback because the feed is
+   * UNAUTHENTICATED. Set `0.0.0.0` on a VPS to reach it from outside, and keep
+   * a firewall in front of the port.
+   */
+  bindHost: z.string().default('127.0.0.1'),
+  /** Watcher asset classes that prefer the live feed. */
+  assetClasses: z.array(z.enum(['crypto', 'forex'])).default(['crypto', 'forex']),
+  /** A cached price older than this is not trusted for a watcher snapshot. */
+  staleMs: z.number().int().positive().default(5_000),
+  /** Ceiling on waiting for the first bar after an on-demand subscribe. */
+  subscribeTimeoutMs: z.number().int().positive().default(4_000),
+})
+
+export type TvFeedConfig = z.infer<typeof tvFeedSchema>
 
 /**
  * In-memory fallback when `ports.json` is absent and Guardian did not inject
@@ -511,6 +564,7 @@ export type Config = {
   snapshot: z.infer<typeof snapshotSchema>
   trading: z.infer<typeof tradingSchema>
   mcp: z.infer<typeof mcpSchema>
+  tvFeed: z.infer<typeof tvFeedSchema>
   ports: z.infer<typeof portsSchema>
   news: z.infer<typeof newsCollectorSchema>
   tools: z.infer<typeof toolsSchema>
@@ -560,7 +614,7 @@ async function loadConfigUnlocked(): Promise<Config> {
   // is pending. See src/migrations/INDEX.md for the full list.
   await runMigrations()
 
-  const files = ['engine.json', 'agent.json', 'crypto.json', 'securities.json', 'market-data.json', 'ai-provider-manager.json', 'snapshot.json', 'mcp.json', 'ports.json', 'news.json', 'tools.json', 'trading.json'] as const
+  const files = ['engine.json', 'agent.json', 'crypto.json', 'securities.json', 'market-data.json', 'ai-provider-manager.json', 'snapshot.json', 'mcp.json', 'ports.json', 'news.json', 'tools.json', 'trading.json', 'tv-feed.json'] as const
   const raws = await Promise.all(files.map((f) => loadJsonFile(f)))
 
   const config: Config = {
@@ -579,6 +633,7 @@ async function loadConfigUnlocked(): Promise<Config> {
     news:          await parseAndSeed(files[9], newsCollectorSchema, raws[9]),
     tools:         await parseAndSeed(files[10], toolsSchema, raws[10]),
     trading:       await parseAndSeed(files[11], tradingSchema, raws[11]),
+    tvFeed:        await parseAndSeed(files[12], tvFeedSchema, raws[12]),
   }
 
   // Guardian injects the ports it claimed as env. Env wins over the file.
@@ -867,6 +922,23 @@ export async function readMarketDataConfig() {
 }
 
 /**
+ * Read the TradingView feed config from disk (called per-request for hot-reload).
+ *
+ * Missing or malformed falls back to schema defaults rather than throwing, for
+ * the same reason {@link readMarketDataConfig} does: this feeds an
+ * agent-facing status probe, which must never fail because a config file is
+ * absent on a fresh install.
+ */
+export async function readTvFeedConfig() {
+  try {
+    const raw = JSON.parse(await readFile(resolve(CONFIG_DIR, 'tv-feed.json'), 'utf-8'))
+    return tvFeedSchema.parse(raw)
+  } catch {
+    return tvFeedSchema.parse({})
+  }
+}
+
+/**
  * Toggle market-data `extraVendors` on/off, persisted to disk. Returns the new list.
  *
  * Deliberately reads the RAW file — NOT the global-merged view
@@ -1082,6 +1154,7 @@ const sectionSchemas: Record<ConfigSection, z.ZodTypeAny> = {
   snapshot: snapshotSchema,
   trading: tradingSchema,
   mcp: mcpSchema,
+  tvFeed: tvFeedSchema,
   ports: portsSchema,
   news: newsCollectorSchema,
   tools: toolsSchema,
@@ -1097,6 +1170,7 @@ const sectionFiles: Record<ConfigSection, string> = {
   snapshot: 'snapshot.json',
   trading: 'trading.json',
   mcp: 'mcp.json',
+  tvFeed: 'tv-feed.json',
   ports: 'ports.json',
   news: 'news.json',
   tools: 'tools.json',

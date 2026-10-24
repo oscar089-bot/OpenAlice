@@ -167,3 +167,30 @@ describe('ArtifactProvenanceStore', () => {
     })).toBeNull()
   })
 })
+
+describe('ArtifactProvenanceStore.removeBySession', () => {
+  it('permanently drops one Session edges and keeps everyone else', async () => {
+    const { path, logger, value } = await store()
+    const origin = (resumeId: string) => ({
+      kind: 'session' as const, workspaceId: 'ws-1', resumeId, agent: 'pi',
+    })
+    const artifact = { kind: 'issue' as const, workspaceId: 'ws-1', issueId: 'desk' }
+    await value.append({ artifact, action: 'commented', origin: origin('resume-dead'), at: 10 })
+    await value.append({ artifact, action: 'commented', origin: origin('resume-live'), at: 20 })
+    await value.append({ artifact, action: 'commented', origin: { kind: 'human' }, at: 30 })
+
+    expect(await value.removeBySession('resume-dead')).toBe(1)
+
+    expect(value.list({ artifact }).map((record) => record.origin.kind)).toEqual(['human', 'session'])
+    expect(value.list({ resumeId: 'resume-dead' })).toEqual([])
+    // The removal is durable, not an in-memory filter.
+    const reloaded = await ArtifactProvenanceStore.load(path, logger)
+    expect(reloaded.list({ resumeId: 'resume-dead' })).toEqual([])
+    expect(reloaded.list({ artifact })).toHaveLength(2)
+  })
+
+  it('is idempotent for an already purged Session', async () => {
+    const { value } = await store()
+    expect(await value.removeBySession('resume-gone')).toBe(0)
+  })
+})

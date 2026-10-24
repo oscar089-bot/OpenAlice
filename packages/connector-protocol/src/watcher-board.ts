@@ -74,6 +74,12 @@ export interface WatcherBoardState {
   lastChecked?: string | null
   lastPrice?: number | null
   lastMarketTimestamp?: string | null
+  /** Which source served `lastPrice`. Absent on older records. */
+  lastPriceSource?: {
+    kind: 'tv-feed' | 'vendor'
+    ref: string
+    fellBack?: boolean
+  } | null
   lastConfirmedCandle?: WatcherBoardCandle | null
   previousConfirmedCandle?: WatcherBoardCandle | null
   terminal?: boolean
@@ -414,6 +420,11 @@ function fallbackPercent(
   price: number,
   anchor: number | null,
 ): number {
+  const width = zone ? Math.abs(zone.high - zone.low) : 0
+  // The smallest span that still reads as real travel. 0.1% of the level is the
+  // same reference the no-anchor branch below uses.
+  const reference = Math.max(width, Math.abs(level) * 0.001, 0.00001)
+
   if (anchor !== null) {
     // Fraction of the way from the anchor to the level: `1 - remaining/total`.
     // Expressed as a ratio of distances rather than a signed difference so the
@@ -421,13 +432,17 @@ function fallbackPercent(
     // silently rejected every `below` watcher, whose span and travel are both
     // negative.
     const total = Math.abs(level - anchor)
-    if (total > 0) {
+    // A last confirmed close that sits essentially ON the level is not a usable
+    // baseline: `total` collapses toward zero, so any real remaining distance
+    // clamps to a flat 0% even when price is a hair from the trigger. Only a
+    // span at least as wide as the reference can express progress; otherwise
+    // fall through to measuring proximity to the level itself.
+    if (total >= reference) {
       const remaining = Math.abs(level - price)
       return clampPercent((1 - remaining / total) * 100)
     }
   }
-  const width = zone ? Math.abs(zone.high - zone.low) : 0
-  const reference = Math.max(width, Math.abs(level) * 0.001, 0.00001)
+
   return clampPercent((1 - Math.abs(level - price) / reference) * 100)
 }
 
@@ -709,6 +724,18 @@ export function renderWatcherBoardCard(input: WatcherBoardInput, frame = 0): Wat
   const marketMs = parseIso(state.lastMarketTimestamp)
   const marketText = marketMs === null ? '-' : `${new Date(marketMs).toISOString().slice(11, 19)} UTC`
   const lastTick = ageSeconds === null ? '-' : `${formatDuration(ageSeconds)} ago`
+  // Say WHICH feed served the price. A bare number cannot distinguish a live
+  // push quote from a delayed vendor bar, and an operator (or an agent asked to
+  // verify) would otherwise have to guess — which is exactly how a live watcher
+  // gets reported as delayed.
+  const source = state.lastPriceSource ?? null
+  const sourceText = source === null
+    ? 'src ?'
+    : source.kind === 'tv-feed'
+      ? 'src LIVE'
+      : source.fellBack
+        ? 'src delayed (live unavailable)'
+        : 'src delayed'
   const direction = String(spec.direction ?? '').trim().toUpperCase() || '-'
   const setupPhase = meta.setupPhase ?? status.toUpperCase()
   const quality = meta.rating ?? meta.grade ?? 'not graded'
@@ -718,7 +745,7 @@ export function renderWatcherBoardCard(input: WatcherBoardInput, frame = 0): Wat
   const card = [
     `${icon} **${spec.pair || '-'}** \`${input.watcherId}\` ${workspace}${direction} ${statusLabel}`,
     `\`${pulse}\``,
-    `\uD83D\uDCB9 \`${formatPriceValue(currentPrice)}\` \u2192 \uD83C\uDFAF \`${target}\` (\`${distance}\`) \u00B7 tick \`#${state.pollCount ?? 0}\` \u00B7 last \`${lastTick}\` \u00B7 market \`${marketText}\``,
+    `\uD83D\uDCB9 \`${formatPriceValue(currentPrice)}\` \u2192 \uD83C\uDFAF \`${target}\` (\`${distance}\`) \u00B7 tick \`#${state.pollCount ?? 0}\` \u00B7 last \`${lastTick}\` \u00B7 market \`${marketText}\` \u00B7 \`${sourceText}\``,,
     `\uD83C\uDFAF \`${bar}\` ${progress.text} \u00B7 ${progress.need}`,
     `${candleCountdown ? `${candleCountdown}\n` : ''}\uD83E\uDDED ${truncate(triggerText, 120)}`,
     `\uD83E\uDDF1 Zone \`${zoneText}\` \u00B7 \uD83E\uDDEC \`${setupPhase}\` \u00B7 \u2B50 \`${quality}\``,

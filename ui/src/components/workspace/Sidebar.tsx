@@ -49,6 +49,8 @@ export interface Selection {
 export interface SpawnOpts {
   readonly resume?: 'last' | string;
   readonly agent?: string;
+  /** Take over watched Issues whose owning Session no longer exists. */
+  readonly adoptOrphanedWatches?: boolean;
 }
 
 export interface SidebarProps {
@@ -323,6 +325,7 @@ export function WorkspaceRow(props: WorkspaceRowProps): ReactElement {
   );
 
   const [spawnMenuOpen, setSpawnMenuOpen] = useState(false);
+  const [adoptOrphaned, setAdoptOrphaned] = useState(false);
   const spawnControlsRef = useRef<HTMLDivElement | null>(null);
   const menuRef = useRef<HTMLUListElement | null>(null);
   const runtimeAgents = props.agents.filter((a) => a.kind !== 'utility');
@@ -353,7 +356,10 @@ export function WorkspaceRow(props: WorkspaceRowProps): ReactElement {
 
   const onPlusClick = (): void => {
     if (defaultAgentEnabled && props.defaultAgent) {
-      props.onSpawn(w.id, { agent: props.defaultAgent });
+      props.onSpawn(w.id, {
+        agent: props.defaultAgent,
+        ...(adoptOrphaned ? { adoptOrphanedWatches: true } : {}),
+      });
       return;
     }
     setSpawnMenuOpen((v) => !v);
@@ -361,7 +367,10 @@ export function WorkspaceRow(props: WorkspaceRowProps): ReactElement {
 
   const onMenuPick = (agentId: string): void => {
     setSpawnMenuOpen(false);
-    props.onSpawn(w.id, { agent: agentId });
+    props.onSpawn(w.id, {
+      agent: agentId,
+      ...(adoptOrphaned ? { adoptOrphanedWatches: true } : {}),
+    });
   };
 
   const plusTitle =
@@ -472,6 +481,20 @@ export function WorkspaceRow(props: WorkspaceRowProps): ReactElement {
                     </button>
                   </li>
                 ))}
+                {/* Opt-in, off by default: a new Session quietly taking over
+                    another Session's watchers would be an edit the operator
+                    never asked for. */}
+                <li role="none" className="mt-1 border-t border-border/70 pt-1">
+                  <label className="flex cursor-pointer items-start gap-2 px-3 py-1.5 text-[11px] leading-[15px] text-muted-foreground">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5 shrink-0"
+                      checked={adoptOrphaned}
+                      onChange={(e) => setAdoptOrphaned(e.target.checked)}
+                    />
+                    <span>{t('workspace.adoptOrphanedWatches')}</span>
+                  </label>
+                </li>
               </ul>
             )}
           </div>

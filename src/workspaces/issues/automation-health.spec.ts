@@ -104,6 +104,32 @@ describe('issueAutomationHealth', () => {
     }).state).toBe('running')
   })
 
+  // Reported bug: deleting the desk Session painted a red blocker on a market
+  // watcher that was still polling fine. A deleted owner self-heals on the next
+  // fire, so watch liveness must win over that recoverable state.
+  it('does not block a live watcher on a deleted owner', () => {
+    const healthyWatch = {
+      terminal: false,
+      errorCount: 0,
+      lastChecked: '2026-01-01T00:00:00.000Z',
+      lastError: null,
+      backoffUntil: null,
+    }
+    expect(issueAutomationHealth({
+      ...base,
+      ownerState: 'deleted',
+      watch: healthyWatch,
+      watchIntervalSeconds: 5,
+    }).state).toBe('healthy')
+
+    // A calendar Issue with no watcher still reports the blocker, because
+    // nothing is polling on its behalf.
+    expect(issueAutomationHealth({ ...base, ownerState: 'deleted' })).toMatchObject({
+      state: 'blocked',
+      message: expect.stringMatching(/deleted/),
+    })
+  })
+
   it('projects a missing effective runtime as a structured blocker', () => {
     expect(issueAutomationHealth({
       ...base,

@@ -99,6 +99,8 @@ import {
 } from './schedule/declaration.js';
 import { WatchLoop } from './watch/loop.js';
 import { createWatchSnapshotProvider } from './watch/snapshot.js';
+import type { TvFeedClient } from '../domain/market-data/tv-feed/index.js';
+import type { WatchAssetClass } from './watch/types.js';
 import { readWatchRecord } from './watch/store.js';
 import { buildWatchAlert, buildWatchWakePrompt } from './watch/wake-prompt.js';
 import { startWatcherBoardPublisher } from '../services/connector-client/watcher-board-bridge.js';
@@ -130,6 +132,7 @@ import {
 import { completeOneShotIssueAfterRun } from './issues/auto-complete.js';
 import {
   readIssueComments,
+  removeSessionComments,
   updateIssueCommentDelivery,
   updateIssueCommentProgress,
 } from './issues/comments.js';
@@ -173,7 +176,7 @@ import {
   BUILTIN_CONNECTOR_DEFINITIONS,
   connectorDefinitionHasCapability,
 } from '@traderalice/connector-protocol';
-import { NEW_THEN_RESUME_ASSIGNEE, sessionSignature } from './session-signature.js';
+import { NEW_EACH_RUN_ASSIGNEE, NEW_THEN_RESUME_ASSIGNEE, sessionSignature } from './session-signature.js';
 import { issueRunFailure } from './issues/run-failure.js';
 import type { IInboxStore } from '@/core/inbox-store.js';
 import { OfficeDayStore } from '@/core/office-day-store.js';
@@ -640,6 +643,13 @@ export interface WorkspaceService {
     wsId: string
     resumeId: string
   }): Promise<ResumeIdentityRecord>;
+  /** Re-point watched Issues whose owner no longer exists at one live Session.
+   *  Used when a fresh Session is created and the operator asked it to adopt
+   *  orphaned watchers. Returns the adopted Issue ids. */
+  adoptOrphanedWatches(input: {
+    wsId: string
+    resumeId: string
+  }): Promise<{ issueIds: string[] }>;
   /** Resolve a `[[name]]` token to the issues across ALL workspaces that claim it.
    *  Matches case-insensitively against an issue's `id` OR its `title` (either is a
    *  valid name handle). Returns every match — 0, 1, or many (a collision the UI
@@ -698,6 +708,15 @@ export interface CreateWorkspaceServiceOptions {
    *  watch loop does not start, so `watch:` blocks stay inert (tests that do
    *  not exercise market data need no provider). */
   readonly barService?: BarService;
+  /**
+   * Optional live TradingView quote source for watchers.
+   *
+   * When present, crypto/forex watchers price from the push feed instead of the
+   * delayed federated layer. Absent/disabled ⇒ unchanged behaviour.
+   */
+  readonly tvFeed?: TvFeedClient;
+  /** Asset classes allowed to use {@link tvFeed} (from `tv-feed.json`). */
+  readonly tvFeedAssetClasses?: readonly WatchAssetClass[];
   /** Internal test seam. Production omits this and keeps the 30-second cadence. */
   readonly watchLoopIntervalMs?: number;
   /**
@@ -2129,8 +2148,14 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
               const comment = comments.ok ? comments.comments.find(row => row.id === reply.commentId) : undefined;
               if (comment) desk = { connectorId: issue.connectorDesk, ...(comment.via ? { inboundConnectorId: comment.via } : {}) };
             } else if (
-              trigger?.metadata?.kind === 'connector-cron-issue'
-              && trigger.metadata.connectorId === issue.connectorDesk
+              // A desk-owned run reaches the phone chat through TWO triggers:
+              // the desk's own cron fire, and a deterministic market watcher on
+              // an Issue that desk owns. Binding only the cron case meant a
+              // fired watcher created a Session whose reply had no delivery
+              // target at all, so nothing ever arrived in Telegram.
+              trigger?.metadata?.kind === 'watch'
+              || (trigger?.metadata?.kind === 'connector-cron-issue'
+                && trigger.metadata.connectorId === issue.connectorDesk)
             ) {
               desk = { connectorId: issue.connectorDesk };
             }
@@ -2314,6 +2339,29 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
           ...(failure ? { error: failure } : {}),
         });
         await stampTelegramDeskFire(rec, r.structured.assistantText);
+        // A watcher run is headless, so an unfinished one fails silently: the
+        // owner sees a fired alert and then nothing. The ONLY signal is the
+        // absence of an Inbox push for this task, and the retry is scoped to
+        // watch-triggered runs — no other execution is ever re-woken here.
+        await continueWatchRunWithoutPush({ task: rec }).catch((err) =>
+          launcherLogger.warn('watch.continue_failed', { taskId: rec.taskId, err }),
+        );
+        // Market events that arrived while this run was working were parked, not
+        // dropped. The owner is free again, so release the oldest one. Draining
+        // after the continuation check keeps the "did it push?" decision tied to
+        // the run that actually owed it.
+        if (trigger?.kind === 'issue') {
+          await scheduleScanner
+            .drainWatchFires(trigger.workspaceId, trigger.issueId)
+            .catch((err) =>
+              launcherLogger.warn('watch.drain_failed', {
+                taskId: rec.taskId,
+                wsId: trigger.workspaceId,
+                issueId: trigger.issueId,
+                err,
+              }),
+            );
+        }
         // Scheduled one-shot issues are the only board items whose lifecycle can
         // be closed mechanically from a run exit. Repeating schedules keep their
         // issue open; failed one-shots stay open so the operator can inspect and
@@ -2480,10 +2528,39 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
       return resolveAdapter(ws, await resolveHeadlessDefaultAgentId(ws));
     },
     dispatch: dispatchHeadlessTaskMethod,
-    claimFreshSession: async ({ issueWorkspace, issueId, taskId, resumeId, agent }) => {
+    isSessionContinuable: (resumeId) => {
+      const identity = resumeRegistry.get(resumeId);
+      // Only a DELETED owner is auto-replaced. A missing or retired identity
+      // keeps its previous blocking behavior so this cannot resurrect a
+      // conversation whose Workspace departed.
+      return identity ? sessionPresence(identity) !== 'deleted' : true;
+    },
+    sessionFallback: (resumeId) => {
+      const identity = resumeRegistry.get(resumeId);
+      if (!identity) return undefined;
+      const binding = identity.runtimeBinding;
+      const credential = binding?.credential;
+      return {
+        ...(identity.agent ? { agent: identity.agent } : {}),
+        ...(credential
+          ? {
+              selection: {
+                ...(credential.source === 'native'
+                  ? { credentialSource: 'native' as const }
+                  : credential.source === 'vault'
+                    ? { credentialSlug: credential.credentialSlug }
+                    : {}),
+                ...(binding?.model ? { model: binding.model } : {}),
+                ...(binding?.reasoningEffort ? { reasoningEffort: binding.reasoningEffort } : {}),
+              },
+            }
+          : {}),
+      };
+    },
+    claimFreshSession: async ({ issueWorkspace, issueId, taskId, resumeId, agent, replacingDeletedOwner }) => {
       const live = await readWorkspaceIssues(issueWorkspace.dir);
       const candidate = live.ok ? live.issues.find((issue) => issue.id === issueId) : undefined;
-      if (!candidate || !issueAssigneeClaimsFirstSession(candidate.assignee)) {
+      if (!candidate || (!issueAssigneeClaimsFirstSession(candidate.assignee) && !replacingDeletedOwner)) {
         launcherLogger.info('issue.first_session_claim_skipped', {
           wsId: issueWorkspace.id,
           issueId,
@@ -2528,6 +2605,22 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
         resumeId,
         agent,
       });
+      // A watcher must never stay armed with no Session to wake. Adopt anything
+      // a deletion parked the moment this Session exists, rather than waiting
+      // for the watcher to fire and discover it has nowhere to go.
+      //
+      // Scoped to the phone-desk Issue on purpose: adoption scans the whole
+      // Workspace, so letting any ordinary Issue's first claim trigger it would
+      // let an unrelated scheduled run capture a desk's parked watchers.
+      if (candidate.connectorDesk) {
+        await adoptOrphanedWatches({
+          wsId: issueWorkspace.id,
+          resumeId,
+          requireParkedByDeletion: true,
+        }).catch((err) =>
+          launcherLogger.warn('watch.birth_adopt_failed', { wsId: issueWorkspace.id, resumeId, err }),
+        );
+      }
     },
     observeIssues: (workspace, issues) => observeIssueRecords(workspace, issues),
     reconcileSessionRuntimeBindings: async () => {
@@ -2546,6 +2639,72 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
       ? { intervalMs: opts.scheduleScannerIntervalMs }
       : {}),
   });
+
+/**
+ * How many times a fired watcher may be re-woken because it finished without
+ * publishing an Inbox entry. Bounded on purpose: a model that is genuinely
+ * stuck would otherwise spawn forever and quietly burn the owner's credits.
+ * Exhausting this budget produces one explicit alert instead of silence.
+ */
+const WATCH_CONTINUATION_LIMIT = 3
+
+  /**
+   * Re-wake a fired watcher that finished without publishing an Inbox entry.
+   *
+   * A watcher run is headless. Its final assistant text is written to the run
+   * record, which no chat surface reads — so a model that answers without
+   * pushing looks identical to one that silently died. The Inbox entry is the
+   * only evidence the owner was actually told, which makes its absence the one
+   * and only retry signal.
+   *
+   * Deliberately scoped to `trigger.metadata.kind === 'watch'`: a comment reply,
+   * a calendar fire, or a manual run must never be re-woken by this rule.
+   */
+  const continueWatchRunWithoutPush = async (input: {
+    task: HeadlessTaskRecord;
+  }): Promise<void> => {
+    const metadata = input.task.trigger?.metadata;
+    if (metadata?.kind !== 'watch' || input.task.trigger?.kind !== 'issue') return;
+    if (!inboxStore) return;
+    const pushed = await inboxStore.read({ limit: 200 }).then((page) =>
+      page.entries.some((entry) => entry.origin?.runId === input.task.taskId),
+    ).catch(() => false);
+    if (pushed) return;
+    const spent = metadata.watchRetries ?? 0;
+    if (spent >= WATCH_CONTINUATION_LIMIT) {
+      launcherLogger.warn('watch.continue_exhausted', {
+        taskId: input.task.taskId,
+        wsId: input.task.trigger.workspaceId,
+        issueId: input.task.trigger.issueId,
+        attempts: spent,
+      });
+      await inboxStore.append({
+        workspaceId: input.task.trigger.workspaceId,
+        body: [
+          '**Watcher analysis did not finish**',
+          '',
+          `Issue \`${input.task.trigger.issueId}\` fired and was re-woken ${spent} time${spent === 1 ? '' : 's'},`,
+          'but never published an Inbox report. Open the Issue to inspect the run.',
+        ].join('\n'),
+        deliverTo: WATCH_ALERT_CONNECTORS,
+      }).catch((err) => launcherLogger.warn('watch.continue_alert_failed', { err }));
+      return;
+    }
+    launcherLogger.info('watch.continue_without_push', {
+      taskId: input.task.taskId,
+      wsId: input.task.trigger.workspaceId,
+      issueId: input.task.trigger.issueId,
+      attempt: spent + 1,
+    });
+    await scheduleScanner.runWatchFire({
+      workspaceId: input.task.trigger.workspaceId,
+      issueId: input.task.trigger.issueId,
+      prompt: input.task.prompt,
+      conditionKey: metadata.conditionKey,
+      eventType: metadata.eventType,
+      watchRetries: spent + 1,
+    });
+  };
 
   // ── Deterministic market watchers. A separate 30-second loop, deliberately
   // independent of the schedule scanner: a slow quote fetch must never delay a
@@ -2577,6 +2736,8 @@ const WATCH_ALERT_CONNECTORS: string[] = ['discord', 'telegram'];
         snapshot: createWatchSnapshotProvider({
           barService: opts.barService,
           logger: launcherLogger.child({ scope: 'watch-snapshot' }),
+          ...(opts.tvFeed ? { tvFeed: opts.tvFeed } : {}),
+          ...(opts.tvFeedAssetClasses ? { tvFeedAssetClasses: opts.tvFeedAssetClasses } : {}),
         }),
         logger: launcherLogger.child({ scope: 'watch' }),
         onBoard: publishWatcherBoard,
@@ -2988,6 +3149,201 @@ const WATCH_ALERT_CONNECTORS: string[] = ['discord', 'telegram'];
     return resumeRegistry.setDisplayName(input)
   }
 
+  /**
+   * Re-point watched Issues away from a Session that is going away.
+   *
+   * A watcher's owner IS the Issue assignee, so deleting its Session leaves the
+   * watcher pointed at a dead handle: it stops delivering to the phone desk and
+   * cannot be resumed. Only Issues that (a) carry a `watch:` and (b) are owned
+   * by the deleted Session are touched; unrelated watchers keep their owner.
+   *
+   * Preference is the newest still-live Session in the same Workspace, because
+   * that is the one the operator is actually talking to. With no live Session
+   * left, the Issue falls back to `@new-then-resume` so the next fire recruits a
+   * replacement instead of dying on a missing owner.
+   *
+   * Confirmation is deliberately a provenance row plus an Inbox push rather
+   * than a comment: a comment on a Session-owned Issue would dispatch an agent
+   * turn, and a re-point must not wake the model.
+   */
+  const reassignWatchesOwnedBy = async (
+    wsId: string,
+    deletedResumeId: string,
+  ): Promise<{ issueIds: string[]; target: string }> => {
+    const ws = registry.get(wsId);
+    if (!ws) return { issueIds: [], target: '' };
+    const read = await readWorkspaceIssues(ws.dir).catch(() => null);
+    if (!read?.ok) return { issueIds: [], target: '' };
+    const owned = read.issues.filter((issue) =>
+      Boolean(issue.watch) && issueAssigneeResumeId(issue.assignee) === deletedResumeId,
+    );
+    if (owned.length === 0) return { issueIds: [], target: '' };
+    const successor = resumeRegistry.list({ wsId }).find((identity) =>
+      identity.resumeId !== deletedResumeId
+      && identity.lifecycle !== 'retired'
+      && sessionPresence(identity) !== 'deleted',
+    );
+    const target = successor ? sessionSignature(successor.resumeId) : NEW_THEN_RESUME_ASSIGNEE;
+    const issueIds: string[] = [];
+    for (const issue of owned) {
+      const updated = await updateIssueFields(ws.dir, issue.id, { assignee: target }).catch((err) => {
+        launcherLogger.warn('watch.reassign_failed', { wsId, issueId: issue.id, target, err });
+        return null;
+      });
+      if (!updated?.ok) continue;
+      issueIds.push(issue.id);
+      await provenanceStore.append({
+        artifact: { kind: 'issue', workspaceId: wsId, issueId: issue.id },
+        action: 'updated',
+        origin: { kind: 'unknown', reason: 'session-deleted' },
+        at: Date.now(),
+        mutation: { fields: [{ field: 'assignee', before: issue.assignee, after: target }] },
+        fingerprint: `watch-reassign:${wsId}:${issue.id}:${deletedResumeId}`,
+      }).catch((err) => launcherLogger.warn('watch.reassign_provenance_failed', { wsId, issueId: issue.id, err }));
+    }
+    if (issueIds.length > 0) {
+      launcherLogger.info('watch.reassigned', { wsId, deletedResumeId, target, issueIds });
+      if (inboxStore) {
+        await inboxStore.append({
+          workspaceId: wsId,
+          workspaceLabel: ws.tag,
+          body: [
+            `**Watchers reattached**`,
+            '',
+            `A deleted Session owned ${issueIds.length} watcher${issueIds.length === 1 ? '' : 's'}.`,
+            `They will attach to the next Session this chat starts.`,
+            '',
+            ...issueIds.map((id) => `- ${id}`),
+          ].join('\n'),
+          deliverTo: WATCH_ALERT_CONNECTORS,
+        }).catch((err) => launcherLogger.warn('watch.reassign_inbox_failed', { wsId, err }));
+      }
+    }
+    return { issueIds, target };
+  };
+
+  /**
+   * Adopt every watched Issue whose owner is no longer live.
+   *
+   * Distinct from {@link reassignWatchesOwnedBy}: that one fires automatically
+   * when a Session is deleted; this one is the operator's explicit choice at
+   * session-creation time. "Orphaned" means the Issue carries a `watch:` and its
+   * assignee is either not an exact Session, or resolves to one that is
+   * missing/retired/deleted. Only those are re-pointed; a watcher with a healthy
+   * owner keeps it, so this can never steal a live watcher.
+   */
+  const adoptOrphanedWatches = async (input: {
+    wsId: string;
+    resumeId: string;
+    /** Only take watchers a Session deletion parked on the policy assignee. */
+    requireParkedByDeletion?: boolean;
+  }): Promise<{ issueIds: string[] }> => {
+    const ws = registry.get(input.wsId);
+    if (!ws) return { issueIds: [] };
+    const identity = resumeRegistry.get(input.resumeId);
+    if (!identity || identity.wsId !== input.wsId) return { issueIds: [] };
+    if (identity.lifecycle === 'retired' || sessionPresence(identity) === 'deleted') {
+      return { issueIds: [] };
+    }
+    const read = await readWorkspaceIssues(ws.dir).catch(() => null);
+    if (!read?.ok) return { issueIds: [] };
+    const target = sessionSignature(input.resumeId);
+    const issueIds: string[] = [];
+    for (const issue of read.issues) {
+      if (!issue.watch) continue;
+      const owner = issueAssigneeResumeId(issue.assignee);
+      if (owner === input.resumeId) continue;
+      if (owner) {
+        const ownerIdentity = resumeRegistry.get(owner);
+        const live = ownerIdentity
+          && ownerIdentity.lifecycle !== 'retired'
+          && sessionPresence(ownerIdentity) !== 'deleted';
+        // A healthy owner is not ours to take.
+        if (live) continue;
+      } else if (issue.assignee === NEW_EACH_RUN_ASSIGNEE) {
+        // `new-each-run` deliberately recruits per fire; it is never owned by a
+        // long-lived Session, so there is nothing to attach.
+        continue;
+      }
+      // NOTE: `@new-then-resume` is deliberately NOT skipped. Deleting a Session
+      // parks its watchers here, and parking is exactly the orphaned state this
+      // method exists to clear. Skipping it is why a deleted owner's watchers
+      // stayed unattached after the next Session was created.
+      if (input.requireParkedByDeletion) {
+        // Only adopt what a deletion actually parked. A watcher the operator
+        // deliberately left on the policy assignee must not be silently claimed
+        // by an unrelated Session that happens to be born first.
+        const parked = provenanceStore.list({
+          artifact: { kind: 'issue', workspaceId: input.wsId, issueId: issue.id },
+          action: 'updated',
+        }).some((record) => record.origin.kind === 'unknown' && record.origin.reason === 'session-deleted')
+        if (!parked) continue
+      }
+      const updated = await updateIssueFields(ws.dir, issue.id, { assignee: target }).catch((err) => {
+        launcherLogger.warn('watch.adopt_failed', { wsId: input.wsId, issueId: issue.id, err });
+        return null;
+      });
+      if (!updated?.ok) continue;
+      issueIds.push(issue.id);
+      await provenanceStore.append({
+        artifact: { kind: 'issue', workspaceId: input.wsId, issueId: issue.id },
+        action: 'updated',
+        origin: { kind: 'unknown', reason: 'watch-adopted' },
+        at: Date.now(),
+        mutation: { fields: [{ field: 'assignee', before: issue.assignee, after: target }] },
+        fingerprint: `watch-adopt:${input.wsId}:${issue.id}:${input.resumeId}`,
+      }).catch((err) => launcherLogger.warn('watch.adopt_provenance_failed', { wsId: input.wsId, issueId: issue.id, err }));
+    }
+    if (issueIds.length > 0) {
+      launcherLogger.info('watch.adopted', { wsId: input.wsId, resumeId: input.resumeId, issueIds });
+      // The operator must learn that a watcher is armed and reachable again;
+      // silence here is how an armed-but-unattached watcher goes unnoticed.
+      if (inboxStore) {
+        await inboxStore.append({
+          workspaceId: input.wsId,
+          workspaceLabel: ws.tag,
+          body: [
+            '**Watchers connected**',
+            '',
+            `${issueIds.length} watcher${issueIds.length === 1 ? '' : 's'} now belong to Session ${input.resumeId}.`,
+            'Their next fire wakes this Session and reports back here.',
+            '',
+            ...issueIds.map((id) => `- ${id}`),
+          ].join('\n'),
+          deliverTo: WATCH_ALERT_CONNECTORS,
+        }).catch((err) => launcherLogger.warn('watch.adopt_inbox_failed', { wsId: input.wsId, err }));
+      }
+    }
+    return { issueIds };
+  };
+
+  /** Drop one Session's words from every store the model reads. Idempotent:
+   * deleting an already-purged Session removes nothing and still succeeds. */
+  const purgeSessionArtifacts = async (wsId: string, resumeId: string): Promise<void> => {
+    const removedEdges = await provenanceStore.removeBySession?.(resumeId).catch((err) => {
+      launcherLogger.warn('session.purge_provenance_failed', { wsId, resumeId, err })
+      return 0
+    })
+    const ws = registry.get(wsId)
+    if (!ws) return
+    const read = await readWorkspaceIssues(ws.dir).catch(() => null)
+    if (!read?.ok) return
+    let removedComments = 0
+    for (const issue of read.issues) {
+      const purged = await removeSessionComments(ws.dir, issue.id, resumeId).catch((err) => {
+        launcherLogger.warn('session.purge_comments_failed', { wsId, resumeId, issueId: issue.id, err })
+        return null
+      })
+      if (purged?.ok) removedComments += purged.removed
+    }
+    launcherLogger.info('session.artifacts_purged', {
+      wsId,
+      resumeId,
+      removedEdges: removedEdges ?? 0,
+      removedComments,
+    })
+  }
+
   const deleteSessionPresence = async (input: {
     wsId: string
     resumeId: string
@@ -3018,6 +3374,17 @@ const WATCH_ALERT_CONNECTORS: string[] = ['discord', 'telegram'];
       if (sessionPresence(current) !== 'deleted') {
         current = await resumeRegistry.setPresence({ ...input, presence: 'deleted' })
       }
+      // A watcher's owner is its Issue assignee, so it must be re-pointed
+      // BEFORE the purge: the assignee is still the deleted signature here.
+      await reassignWatchesOwnedBy(input.wsId, input.resumeId).catch((err) =>
+        launcherLogger.warn('watch.reassign_skipped', { wsId: input.wsId, resumeId: input.resumeId, err }),
+      )
+      // Delete means remove, not hide. Both stores below feed the next turn's
+      // prompt, so leaving the rows behind would keep a deleted conversation
+      // readable by the model. Purge runs AFTER the presence transition: the
+      // Session is already unusable, so a purge failure must not roll it back —
+      // it is logged and the idempotent purge is retried by a later delete.
+      await purgeSessionArtifacts(input.wsId, input.resumeId)
       return current
     } finally {
       activeResumeIds.delete(input.resumeId)
@@ -3839,6 +4206,7 @@ const WATCH_ALERT_CONNECTORS: string[] = ['discord', 'telegram'];
     setSessionPresence,
     setSessionDisplayName,
     deleteSessionPresence,
+    adoptOrphanedWatches,
     resolveIssuesByName,
     headlessTasks,
     resumeRegistry,

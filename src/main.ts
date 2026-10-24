@@ -46,6 +46,9 @@ import { createQuantTools } from './tool/quant.js'
 import { createSnapshotTools } from './tool/snapshot.js'
 import { createSimulateTools } from './tool/simulate.js'
 import { createBarService } from './domain/market-data/bars/index.js'
+import { TvFeedClient, TvFeedSupervisor } from './domain/market-data/tv-feed/index.js'
+import { ExternalMcpManager } from './services/external-mcp/index.js'
+import { logger as workspaceLogger } from './workspaces/logger.js'
 import { createReferenceData } from './domain/market-data/reference/service.js'
 import { createSectorRotationTools } from './tool/sector-rotation.js'
 import { createReferenceBoardTools } from './tool/reference-board.js'
@@ -295,6 +298,15 @@ async function main() {
 
   console.log(`tool-center: ${toolCenter.list().length} tools registered`)
 
+  // ==================== External MCP servers (client side) ====================
+  // Connects to user-configured third-party MCP servers and re-exports their
+  // tools through the same ToolCenter every surface already reads. Empty by
+  // default; a server that fails to start is logged and skipped, never fatal.
+  const externalMcp = new ExternalMcpManager(
+    toolCenter,
+    workspaceLogger.child({ scope: 'external-mcp' }),
+  )
+
   // ==================== Inbox store ====================
 
   const inboxStore = createInboxStore()
@@ -337,6 +349,27 @@ async function main() {
   // ==================== News Collector ====================
 
   let newsCollector: NewsCollector | null = null
+
+  // ==================== TradingView live feed (optional) ====================
+  // Watcher-grade realtime quotes. OFF unless `tv-feed.json` enables it. The
+  // client is fail-soft: when the service is not running, `getQuote()` returns
+  // null and the watch snapshot provider falls back to `barService` exactly as
+  // before. Nothing else in Alice depends on this being present.
+  const tvFeed = config.tvFeed.enabled
+    ? new TvFeedClient(config.tvFeed, workspaceLogger.child({ scope: 'tv-feed' }))
+    : null
+  // Spawn the feed service when enabled, so `pnpm dev`, `pnpm start`, and
+  // packaged Electron all get it without launcher-specific code. The client
+  // reconnects on its own, so starting the child and connecting in either order
+  // is safe.
+  const tvFeedSupervisor = config.tvFeed.enabled && config.tvFeed.autoStart
+    ? new TvFeedSupervisor(config.tvFeed, workspaceLogger.child({ scope: 'tv-feed' }))
+    : null
+  tvFeedSupervisor?.start()
+  if (tvFeed) {
+    tvFeed.connect()
+    console.log(`tv-feed: connecting to ${config.tvFeed.url} (${config.tvFeed.assetClasses.join(', ')})`)
+  }
 
   // ==================== Plugins ====================
 
@@ -400,6 +433,7 @@ async function main() {
         // layer is unavailable; otherwise `watch:` blocks evaluate on the
         // WatchLoop default cadence (currently 5s), not a fixed override here.
         barService,
+        ...(tvFeed ? { tvFeed, tvFeedAssetClasses: config.tvFeed.assetClasses } : {}),
       },
       workspaceServiceRef,
     ))
@@ -462,6 +496,11 @@ async function main() {
     console.log(`news-collector: started (${activeCount}/${config.news.feeds.length} feeds active, every ${config.news.intervalMinutes}m)`)
   }
 
+  // External MCP servers: bounded connect, failures logged and skipped. Run
+  // after the core plugins so a slow third-party server never delays the local
+  // listeners Alice itself needs.
+  await externalMcp.start(config.mcp.externalServers)
+
   console.log('engine: started')
   scheduleInstalledBrokerPackReconciliation()
 
@@ -474,6 +513,9 @@ async function main() {
   const shutdown = async () => {
     stopped = true
     await removeCliEndpoint()
+    tvFeed?.close()
+    tvFeedSupervisor?.stop()
+    await externalMcp.stop()
     newsCollector?.stop()
     for (const plugin of [...corePlugins, ...optionalPlugins.values()]) {
       await plugin.stop()

@@ -418,6 +418,10 @@ export function evaluateWatch(
   next.lastChecked = nowIso
   next.lastMarketTimestamp = snapshot.timestamp
   next.lastPrice = snapshot.price
+  // Persist provenance alongside the price. A bare number cannot tell an
+  // operator whether this watcher is on live push data or a delayed vendor
+  // feed, and an agent asked to check will otherwise have to guess.
+  next.lastPriceSource = snapshot.priceSource ?? null
   if (!next.armedAt) next.armedAt = nowIso
 
   // Refresh candle bookkeeping so status readouts and the next pass agree.

@@ -34,6 +34,26 @@ export interface WatchSnapshot {
   timestamp: string
   timeframe?: string
   candles?: WatchCandle[]
+  /**
+   * WHERE this price came from.
+   *
+   * Recorded because a price alone cannot tell an operator (or the model) which
+   * path served it: a live push quote and a delayed vendor bar are both just a
+   * number. Without this, an agent inspecting a watcher has to guess, and will
+   * reasonably conclude "delayed" whenever it cannot find a process to point
+   * at.
+   */
+  priceSource?: WatchPriceSource
+}
+
+/** Provenance for one snapshot's price. */
+export interface WatchPriceSource {
+  /** `tv-feed` = real-time TradingView push; `vendor` = federated bar layer. */
+  kind: 'tv-feed' | 'vendor'
+  /** The exact ticker/barId that produced the price, for verification. */
+  ref: string
+  /** True when the live feed was tried but did not supply a usable quote. */
+  fellBack?: boolean
 }
 
 export type WatchAssetClass = 'crypto' | 'forex' | 'equity' | 'commodity' | 'index'
@@ -135,6 +155,10 @@ export interface WatchState {
   lastChecked: string | null
   lastPrice: number | null
   lastMarketTimestamp: string | null
+  /** Which source produced `lastPrice`. Persisted so a restart does not lose
+   *  the answer to "is this watcher on live data?". Optional because records
+   *  written before this field existed are still valid. */
+  lastPriceSource?: WatchPriceSource | null
   lastConfirmedCandle: WatchCandle | null
   previousConfirmedCandle: WatchCandle | null
   lastEvent: string | null
@@ -201,6 +225,7 @@ export function emptyWatchState(now: string): WatchState {
     lastChecked: null,
     lastPrice: null,
     lastMarketTimestamp: null,
+    lastPriceSource: null,
     lastConfirmedCandle: null,
     previousConfirmedCandle: null,
     lastEvent: null,

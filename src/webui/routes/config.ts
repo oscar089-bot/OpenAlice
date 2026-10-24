@@ -32,6 +32,7 @@ import { providerModelCatalog, type ProviderModelCatalogStore } from '../../ai-p
 import { modelDiscoveryInput } from '../../ai-providers/model-discovery.js'
 import { resolveAnthropicAuthMode } from '../../core/credential-inference.js'
 import { probeByWireShape } from '../../workspaces/agent-probe.js'
+import { probeExternalMcpServer } from '../../services/external-mcp/probe.js'
 import { createBuiltinAdapterRegistry } from '../../workspaces/adapters/index.js'
 import {
   isAgentRuntime,
@@ -296,8 +297,42 @@ export function createConfigRoutes(opts?: ConfigRouteOpts) {
     }
   })
 
-  // ============ Default Workspace Credentials (per-agent) ============
-  //
+  /**
+   * POST /mcp/test — probe one external MCP server without registering it.
+   *
+   * Backs the Test button in Settings → MCP Server. Spawns the command, lists
+   * its tools, and tears the process down. Used BEFORE adding, so a typo in a
+   * command or args is caught while the operator is still editing the form.
+   */
+  app.post('/mcp/test', async (c) => {
+    try {
+      const body = await c.req.json<{
+        command?: string
+        args?: string[]
+        env?: Record<string, string>
+        cwd?: string
+      }>()
+      if (!body.command || !body.command.trim()) {
+        return c.json({ ok: false, error: 'Command is required.' })
+      }
+      const args = Array.isArray(body.args) ? body.args.filter((a) => typeof a === 'string') : []
+      const env: Record<string, string> = {}
+      for (const [key, value] of Object.entries(body.env ?? {})) {
+        if (typeof value === 'string') env[key] = value
+      }
+      const result = await probeExternalMcpServer({
+        command: body.command,
+        args,
+        env,
+        ...(typeof body.cwd === 'string' && body.cwd.trim() ? { cwd: body.cwd.trim() } : {}),
+      })
+      return c.json(result)
+    } catch (err) {
+      return c.json({ ok: false, error: err instanceof Error ? err.message : String(err) })
+    }
+  })
+
+  // ============ Default Workspace Credentials (per-agent) ============  //
   // Deprecated installation-level creation seeds. The Workspace creator
   // translates this per-agent map into secret-free `.alice/settings.json`
   // preferences; it no longer writes native CLI project configuration.

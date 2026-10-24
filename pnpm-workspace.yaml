@@ -2,6 +2,11 @@ packages:
   - apps/*
   - packages/*
   - services/*
+  # `services/tv-feed` is a verbatim third-party microservice that Alice talks
+  # to over WebSocket, never imports. Excluded so its own dependency tree (and
+  # its express 5 vs express-ws peer range) cannot perturb the monorepo install.
+  # Install and run it on its own: `cd services/tv-feed && npm install`.
+  - '!services/tv-feed'
   - ui
 
 allowBuilds:

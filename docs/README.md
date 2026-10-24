@@ -42,6 +42,7 @@ GitHub navigation.
 | [[docs/uta-live-testing.md]] | [UTA live testing](uta-live-testing.md) | Real broker/demo acceptance scenarios and trading invariants |
 | [[docs/ibkr-wire-protocol.md]] | [IBKR wire protocol](ibkr-wire-protocol.md) | TWS/Gateway inbound framing, payload-only decoder contract, failure isolation, and verification |
 | [[docs/market-data-architecture.md]] | [Market data architecture](market-data-architecture.md) | TraderHub/reference data, BarService K-lines, and the private provider compatibility layer |
+| [[docs/tradingview-feed-and-external-mcp.md]] | [TradingView feed and external MCP](tradingview-feed-and-external-mcp.md) | Optional realtime watcher feed for crypto/forex, and third-party MCP servers consumed as a client |
 
 Other files under `docs/images/` are README/product assets rather than owner
 guides.

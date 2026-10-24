@@ -28,6 +28,7 @@ const mocks = vi.hoisted(() => ({
   getWorkspaceSessionDirectory: vi.fn(),
   listAgentCredentials: vi.fn(),
   updateResumeRuntime: vi.fn(),
+  deleteSessionByResumeId: vi.fn(),
   getPresets: vi.fn(),
   getWorkspaceCredentialDefaults: vi.fn(),
   getAgentRuntimeReadiness: vi.fn(),
@@ -114,6 +115,7 @@ vi.mock('./workspace/api', async (importOriginal) => {
     getWorkspaceSessionDirectory: mocks.getWorkspaceSessionDirectory,
     listAgentCredentials: mocks.listAgentCredentials,
     updateResumeRuntime: mocks.updateResumeRuntime,
+    deleteSessionByResumeId: mocks.deleteSessionByResumeId,
   }
 })
 
@@ -154,6 +156,9 @@ beforeEach(async () => {
   scheduledIssue.issue.assignee = '@new-each-run'
   scheduledIssue.issue.agent = 'codex'
   delete scheduledIssue.issue.commentPrompt
+  delete scheduledIssue.issue.connectorDesk
+  mocks.deleteSessionByResumeId.mockReset()
+  mocks.deleteSessionByResumeId.mockResolvedValue(undefined)
   mocks.updateIssue.mockResolvedValue(scheduledIssue)
   mocks.updateResumeRuntime.mockClear()
   mocks.updateResumeRuntime.mockResolvedValue({
@@ -1134,5 +1139,77 @@ describe('IssueDetail market watcher', () => {
     expect(screen.getByText('Finished')).toBeTruthy()
     expect(screen.getByText('1')).toBeTruthy()
     expect(screen.getByText(/ETH-USDT broke above 3000/)).toBeTruthy()
+  })
+})
+
+describe('IssueDetail connector desk Sessions', () => {
+  it('lists every Session and deletes one after confirmation', async () => {
+    scheduledIssue.issue.connectorDesk = 'telegram'
+    mocks.getWorkspaceSessionDirectory.mockResolvedValue({
+      sessions: [
+        {
+          resumeId: 'resume-desk-new',
+          agent: 'claude',
+          createdAt: Date.now() - 1_000,
+          updatedAt: Date.now(),
+          resumable: true,
+          active: false,
+          displayName: 'Fresh desk',
+        },
+        {
+          resumeId: 'resume-desk-old',
+          agent: 'claude',
+          createdAt: Date.now() - 86_400_000,
+          updatedAt: Date.now() - 60_000,
+          resumable: true,
+          active: false,
+        },
+      ],
+    })
+
+    render(<IssueDetail wsId="demo-ws-auto-quant" id="morning-scan" />)
+
+    expect(await screen.findByRole('heading', { level: 2, name: 'Sessions' })).toBeTruthy()
+    expect(screen.getByText('Fresh desk')).toBeTruthy()
+    expect(screen.getByText(/claude · resume-desk-old/)).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete Session resume-desk-old' }))
+    const dialog = await screen.findByRole('alertdialog')
+    expect(mocks.deleteSessionByResumeId).not.toHaveBeenCalled()
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }))
+    await waitFor(() => expect(mocks.deleteSessionByResumeId).toHaveBeenCalledWith(
+      'demo-ws-auto-quant',
+      'resume-desk-old',
+    ))
+  })
+
+  it('shows the refusal message when the Session is busy', async () => {
+    scheduledIssue.issue.connectorDesk = 'telegram'
+    mocks.getWorkspaceSessionDirectory.mockResolvedValue({
+      sessions: [{
+        resumeId: 'resume-desk-busy',
+        agent: 'claude',
+        createdAt: Date.now() - 1_000,
+        updatedAt: Date.now(),
+        resumable: true,
+        active: true,
+      }],
+    })
+    mocks.deleteSessionByResumeId.mockRejectedValue(new Error('this conversation already has a running turn'))
+
+    render(<IssueDetail wsId="demo-ws-auto-quant" id="morning-scan" />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Delete Session resume-desk-busy' }))
+    fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Delete' }))
+
+    expect(await screen.findByText(/this conversation already has a running turn/)).toBeTruthy()
+    expect(mocks.deleteSessionByResumeId).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not render the Sessions section for an ordinary Issue', async () => {
+    render(<IssueDetail wsId="demo-ws-auto-quant" id="morning-scan" />)
+    await waitFor(() => expect(mocks.getWorkspaceSessionDirectory).toHaveBeenCalled())
+    expect(screen.queryByRole('heading', { level: 2, name: 'Sessions' })).toBeNull()
   })
 })

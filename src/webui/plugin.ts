@@ -87,6 +87,11 @@ export interface WebConfig {
   /** Federated bar access for deterministic market watchers. When absent the
    *  watch loop does not start, so `watch:` blocks stay inert. */
   barService?: BarService
+  /** Optional live TradingView quote source for watchers. Absent/disabled ⇒
+   *  watchers keep using the delayed federated layer. */
+  tvFeed?: import('../domain/market-data/tv-feed/index.js').TvFeedClient
+  /** Asset classes allowed to use `tvFeed` (from `tv-feed.json`). */
+  tvFeedAssetClasses?: readonly import('../workspaces/watch/types.js').WatchAssetClass[]
   /** Internal packaged-acceptance seam for the watch loop cadence. */
   watchLoopIntervalMs?: number
 }
@@ -296,6 +301,8 @@ export class WebPlugin implements Plugin {
         ? { scheduleScannerIntervalMs: this.config.scheduleScannerIntervalMs }
         : {}),
       ...(this.config.barService ? { barService: this.config.barService } : {}),
+      ...(this.config.tvFeed ? { tvFeed: this.config.tvFeed } : {}),
+      ...(this.config.tvFeedAssetClasses ? { tvFeedAssetClasses: this.config.tvFeedAssetClasses } : {}),
       ...(this.config.watchLoopIntervalMs !== undefined
         ? { watchLoopIntervalMs: this.config.watchLoopIntervalMs }
         : {}),

@@ -308,6 +308,18 @@ export const configKeysHandlers = [
   http.delete('/api/config/credentials/:slug', () => HttpResponse.json({ success: true })),
   http.post('/api/config/credentials/test', () => HttpResponse.json({ ok: true, response: 'Hi!' })),
 
+  // External MCP server probe (Settings → MCP Server → Test).
+  http.post('/api/config/mcp/test', () =>
+    HttpResponse.json({
+      ok: true,
+      server: { name: 'demo-mcp', version: '1.0.0' },
+      tools: [
+        { name: 'echo', description: 'Echo a message back' },
+        { name: 'add', description: 'Add two numbers' },
+      ],
+    }),
+  ),
+
   // Per-agent default workspace credentials (AI Provider page)
   http.get('/api/config/workspace-credential-defaults', () =>
     HttpResponse.json({

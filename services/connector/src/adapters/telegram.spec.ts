@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto'
-import { GrammyError } from 'grammy'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { InboxNotification } from '@traderalice/connector-protocol'
 import { CommandRegistry } from '../core/adapter.js'
@@ -63,8 +62,30 @@ vi.mock('@grammyjs/auto-retry', () => ({
   autoRetry: () => () => undefined,
 }))
 
-function context() {
+/** Minimal panel a fake Alice can return; the adapter must render it as-is. */
+function sessionPanel() {
   return {
+    issueId: 'telegram-phone-desk',
+    currentResumeId: 'resume-current',
+    assignee: '@resume-current',
+    revision: 'rev-1',
+    running: false,
+    view: 'sessions' as const,
+    page: 0,
+    pageCount: 1,
+    sessions: [
+      { resumeId: 'resume-current', label: 'Current desk', agent: 'claude', current: true, running: false, presence: 'active' as const, updatedAt: 2 },
+      { resumeId: 'resume-old', label: 'Old desk', agent: 'claude', current: false, running: false, presence: 'active' as const, updatedAt: 1 },
+    ],
+    agents: [{ id: 'claude', label: 'Claude', installed: true }],
+    credentials: [{ id: 'native', label: 'Runtime login' }],
+    models: [{ id: 'sonnet', label: 'Sonnet' }],
+    efforts: ['high'],
+    draft: { policy: null, agent: 'claude', credential: 'native', model: null, effort: null },
+  }
+}
+
+function context() {  return {
     commands: new CommandRegistry('telegram'),
     updateSettings: async () => undefined,
     getServiceStatus: () => 'healthy',
@@ -701,44 +722,38 @@ it('reports when the owner has nothing to stop', async () => {
   } finally { await adapter.stop() }
 })
 
-it('starts a fresh desk Session only for the linked owner', async () => {
+it('opens the Session panel only for the linked owner', async () => {
   startMock.mockImplementation(async ({ onStart }) => { onStart?.() })
   const adapter = new TelegramConnectorAdapter()
-  const newDeskSession = vi.fn(async () => ({ started: true, previousResumeId: 'resume-old' }))
+  const sessionDesk = vi.fn(async () => sessionPanel())
   try {
-    await adapter.start({ enabled: true, settings: { botToken: 'test-token', ownerUserId: '42', chatId: '42' } }, { ...context(), newDeskSession })
-    await vi.waitFor(() => expect(handlers.has('new')).toBe(true))
+    await adapter.start({ enabled: true, settings: { botToken: 'test-token', ownerUserId: '42', chatId: '42' } }, { ...context(), sessionDesk })
+    await vi.waitFor(() => expect(handlers.has('session')).toBe(true))
     const reply = vi.fn(async () => ({ message_id: 9 }))
     const ctx = { chat: { id: 42, type: 'private' }, from: { id: 77 }, reply }
-    await handlers.get('new')!(ctx)
-    expect(newDeskSession).not.toHaveBeenCalled()
+    await handlers.get('session')!(ctx)
+    expect(sessionDesk).not.toHaveBeenCalled()
     ctx.from.id = 42
-    await handlers.get('new')!(ctx)
-    expect(newDeskSession).toHaveBeenCalledTimes(1)
-    expect(reply).toHaveBeenCalledWith(expect.stringContaining('Fresh Session ready'))
+    await handlers.get('session')!(ctx)
+    expect(sessionDesk).toHaveBeenCalledWith({})
+    expect(reply).toHaveBeenCalledWith(
+      expect.stringContaining('Current:'),
+      expect.objectContaining({ reply_markup: expect.anything() }),
+    )
   } finally { await adapter.stop() }
 })
 
-it('refuses to start a new desk Session while a reply is running', async () => {
+it('reports Session controls as unavailable when Alice cannot serve them', async () => {
   startMock.mockImplementation(async ({ onStart }) => { onStart?.() })
   const adapter = new TelegramConnectorAdapter()
   const reply = vi.fn(async () => ({ message_id: 10 }))
   try {
-    await adapter.start({ enabled: true, settings: { botToken: 'test-token', ownerUserId: '42', chatId: '42' } }, { ...context(), newDeskSession: async () => ({ started: false, reason: 'running' }) })
-    await vi.waitFor(() => expect(handlers.has('new')).toBe(true))
-    await handlers.get('new')!({ chat: { id: 42, type: 'private' }, from: { id: 42 }, reply })
-    expect(reply).toHaveBeenCalledWith('An Agent reply is running. Use /stop first, then /new.')
+    await adapter.start({ enabled: true, settings: { botToken: 'test-token', ownerUserId: '42', chatId: '42' } }, { ...context(), sessionDesk: undefined })
+    await vi.waitFor(() => expect(handlers.has('session')).toBe(true))
+    await handlers.get('session')!({ chat: { id: 42, type: 'private' }, from: { id: 42 }, reply })
+    expect(reply).toHaveBeenCalledWith('Session controls are unavailable. Update OpenAlice.')
   } finally { await adapter.stop() }
 })
-
-// "message is not modified" is a success Telegram reports as an error.
-function notModifiedError() {
-  return new GrammyError("Call to 'editMessageText' failed!", {
-    ok: false,
-    error_code: 400,
-    description: 'Bad Request: message is not modified',
-  }, 'editMessageText', {})
-}
 
 function boardCtx(overrides: Record<string, unknown> = {}) {
   return {
@@ -767,74 +782,48 @@ describe('Telegram watcher board', () => {
     return adapter
   }
 
-  it('opens one message on /watchers and re-adopts it rather than posting a second', async () => {
+  it('replaces the board on each /watchers so it reappears at the bottom', async () => {
     const adapter = await startBoard()
     try {
       const first = boardCtx()
       await handlers.get('watchers')!(first)
       expect(first.reply).toHaveBeenCalledTimes(1)
-      expect(first.api.editMessageText).not.toHaveBeenCalled()
 
-      // Second run edits the SAME message. A second send would litter the chat
-      // with a stale duplicate board.
+      // A second /watchers retires the previous message and posts a fresh one.
+      // Editing the old message in place would update it somewhere up in the
+      // operator's scrollback, which reads as "the command did nothing".
       const second = boardCtx()
       await handlers.get('watchers')!(second)
-      expect(second.reply).not.toHaveBeenCalled()
-      expect(second.api.editMessageText).toHaveBeenCalledWith(
-        42,
-        555,
-        expect.any(String),
-        expect.objectContaining({ parse_mode: 'HTML' }),
-      )
+      expect(second.api.deleteMessage).toHaveBeenCalledWith(42, 555)
+      expect(second.reply).toHaveBeenCalledTimes(1)
+      expect(second.api.editMessageText).not.toHaveBeenCalled()
     } finally { await adapter.stop() }
   })
 
-  // The regression this file exists to pin. Before the fix, an unchanged board
-  // made Telegram answer 400 and the error escaped, so `/watchers` looked dead
-  // whenever the live 5s tick had already drawn the current state.
-  it('treats "message is not modified" as success instead of failing the command', async () => {
+  // The single-live-board invariant. Retiring the old message is what keeps
+  // re-opening from littering the chat with stale duplicates.
+  it('never leaves two boards behind when /watchers is repeated', async () => {
     const adapter = await startBoard()
     try {
       await handlers.get('watchers')!(boardCtx())
-      const reopening = boardCtx()
-      reopening.api.editMessageText.mockRejectedValueOnce(notModifiedError())
-      await expect(handlers.get('watchers')!(reopening)).resolves.toBeUndefined()
-      // And it must NOT recover by posting a duplicate.
-      expect(reopening.reply).not.toHaveBeenCalled()
+      const reopened = boardCtx()
+      await handlers.get('watchers')!(reopened)
+      // Exactly one delete + one send: the old copy is gone, one new copy exists.
+      expect(reopened.api.deleteMessage).toHaveBeenCalledTimes(1)
+      expect(reopened.reply).toHaveBeenCalledTimes(1)
     } finally { await adapter.stop() }
   })
 
-  it('posts a fresh board when the existing message was deleted out-of-band', async () => {
-    const adapter = await startBoard()
-    try {
-      await handlers.get('watchers')!(boardCtx())
-      const gone = boardCtx()
-      gone.api.editMessageText.mockRejectedValueOnce(new GrammyError(
-        "Call to 'editMessageText' failed!",
-        { ok: false, error_code: 400, description: 'Bad Request: message to edit not found' },
-        'editMessageText',
-        {},
-      ))
-      await handlers.get('watchers')!(gone)
-      // Doing nothing here would look like a broken command, so a fresh board
-      // is the honest recovery.
-      expect(gone.reply).toHaveBeenCalledTimes(1)
-    } finally { await adapter.stop() }
-  })
-
-  it('surfaces an unrelated edit failure rather than silently swallowing it', async () => {
+  it('still posts a fresh board when retiring the old message fails', async () => {
     const adapter = await startBoard()
     try {
       await handlers.get('watchers')!(boardCtx())
       const broken = boardCtx()
-      broken.api.editMessageText.mockRejectedValueOnce(new Error('network down'))
+      // Deleting is best-effort: a message the operator already removed, or a
+      // transient Telegram failure, must not block the new board.
+      broken.api.deleteMessage.mockRejectedValueOnce(new Error('network down'))
       await handlers.get('watchers')!(broken)
-      // The command handler owns the error presentation: a real failure must be
-      // TOLD to the operator, and must not be papered over by quietly posting a
-      // duplicate board that would then compete with the live one.
-      expect(broken.reply).toHaveBeenCalledWith(
-        expect.stringContaining('Could not open the watcher board'),
-      )
+      expect(broken.reply).toHaveBeenCalledTimes(1)
     } finally { await adapter.stop() }
   })
 
@@ -852,7 +841,8 @@ describe('Telegram watcher board', () => {
       const reopened = boardCtx()
       await handlers.get('watchers')!(reopened)
       expect(reopened.reply).toHaveBeenCalledTimes(1)
-      expect(reopened.api.editMessageText).not.toHaveBeenCalled()
+      // The close already nulled the ids, so there is nothing to retire.
+      expect(reopened.api.deleteMessage).not.toHaveBeenCalled()
     } finally { await adapter.stop() }
   })
 

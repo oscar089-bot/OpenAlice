@@ -12,11 +12,13 @@
 import { formatBarId, parseBarId } from '../../domain/market-data/bars/types.js'
 import type { BarService, OhlcvBar } from '../../domain/market-data/bars/types.js'
 import type { AssetClass } from '../../domain/market-data/aggregate-search.js'
+import { toTvTicker } from '../../domain/market-data/tv-feed/index.js'
 import type { Logger } from '../logger.js'
 
 import type {
   WatchAssetClass,
   WatchCandle,
+  WatchPriceSource,
   WatchSnapshot,
   WatchSpec,
 } from './types.js'
@@ -288,6 +290,111 @@ export interface WatchSnapshotProviderDeps {
   barService: BarService
   logger: Logger
   now?: () => number
+  /**
+   * Optional live TradingView quote source.
+   *
+   * When present AND the watcher's asset class is enabled in `tv-feed.json`,
+   * the pair's PRICE comes from the live push feed instead of the delayed
+   * federated bar layer. History still comes from `barService`, because the
+   * live feed only ever sends the still-forming candle — `candle_close` rules
+   * need the confirmed candles behind it.
+   *
+   * Absent, disabled, disconnected, stale, or unsupported ⇒ the provider
+   * behaves exactly as before. This is the whole safety story: the live feed
+   * can only ever make a snapshot fresher, never make one disappear.
+   */
+  tvFeed?: import('../../domain/market-data/tv-feed/index.js').TvFeedClient
+  /** Asset classes allowed to use the live feed (from `tv-feed.json`). */
+  tvFeedAssetClasses?: readonly WatchAssetClass[]
+}
+
+/**
+ * Convert a live forming candle into watcher terms.
+ *
+ * The feed's `closed` flag is authoritative for *whether the service considers
+ * the candle final*, but it is NOT trusted on its own: a re-subscribe can replay
+ * a just-closed period, and a clock skew can deliver `closed` before the period
+ * has actually elapsed locally. `candle_close` rules must never fire on a candle
+ * that could still change, so confirmation additionally requires the period to
+ * have ended by OUR clock.
+ *
+ * The guard is one-directional: it can only downgrade a suspicious `closed` to
+ * `confirmed: false`, never upgrade a forming candle. So it cannot make a
+ * watcher fire more eagerly than the local time allows.
+ */
+function liveToWatchCandle(
+  quote: import('../../domain/market-data/tv-feed/index.js').TvLiveQuote,
+  timeframe: string,
+  nowMs: number,
+): WatchCandle {
+  const span = timeframeMs(timeframe)
+  const periodEnded = span > 0 && quote.timeMs + span <= nowMs
+  return {
+    timestamp: new Date(quote.timeMs).toISOString(),
+    open: quote.open,
+    high: quote.high,
+    low: quote.low,
+    close: quote.close,
+    volume: quote.volume,
+    timeframe,
+    confirmed: quote.closed && periodEnded,
+  }
+}
+
+/**
+ * Merge the live forming candle onto history.
+ *
+ * History is authoritative for anything older than the live candle. When the
+ * live candle is newer than the last history bar it is appended; when it is the
+ * same period it REPLACES the history bar (whose close is a delayed snapshot of
+ * the same candle). A live candle OLDER than history is ignored — history wins.
+ */
+function mergeLiveCandle(
+  history: WatchCandle[],
+  live: WatchCandle,
+): WatchCandle[] {
+  const liveMs = parseBarTime(live.timestamp)
+  if (liveMs === null) return [...history, live]
+
+  const merged: WatchCandle[] = []
+  let replaced = false
+  for (const candle of history) {
+    const candleMs = parseBarTime(candle.timestamp)
+    if (candleMs === null || candleMs < liveMs) {
+      merged.push(candle)
+    } else if (candleMs === liveMs) {
+      merged.push(live)
+      replaced = true
+    }
+    // candleMs > liveMs: the live candle is behind history — drop it.
+  }
+  if (!replaced && merged.length === history.length) {
+    merged.push(live)
+  }
+  return merged
+}
+
+/**
+ * Every distinct candle interval this snapshot must carry.
+ *
+ * A `candle_close` rule may name its OWN `timeframe`, independent of
+ * `watch.timeframe`. The evaluator filters candles strictly by the RULE's
+ * timeframe (`matchingCandles`), so serving only `spec.timeframe` silently
+ * starves such a rule: it sees zero candles and can never fire.
+ *
+ * Fetching the union makes "a 15m close inside a 1h watcher" work, which is the
+ * whole point of a per-rule timeframe.
+ */
+export function requiredSnapshotIntervals(spec: WatchSpec): string[] {
+  const intervals = new Set<string>()
+  const primary = (spec.timeframe ?? '').trim()
+  if (primary) intervals.add(primary)
+  for (const rule of [...spec.rules, ...spec.invalidationRules]) {
+    if (rule.type !== 'candle_close') continue
+    const timeframe = (rule.timeframe ?? '').trim()
+    if (timeframe) intervals.add(timeframe)
+  }
+  return [...intervals]
 }
 
 /**
@@ -300,39 +407,141 @@ export function createWatchSnapshotProvider(
   deps: WatchSnapshotProviderDeps,
 ): (spec: WatchSpec) => Promise<WatchSnapshot | null> {
   const now = deps.now ?? Date.now
-  return async (spec) => {
-    const nowMs = now()
-    const ref = resolveWatchRef(spec)
+
+  /** Live quote for one interval, or null when the feed cannot serve it. */
+  const tryLiveQuote = async (
+    spec: WatchSpec,
+    interval: string,
+  ): Promise<import('../../domain/market-data/tv-feed/index.js').TvLiveQuote | null> => {
+    const feed = deps.tvFeed
+    if (!feed) return null
+    const allowed = deps.tvFeedAssetClasses ?? ['crypto', 'forex']
+    if (!allowed.includes(spec.assetClass)) return null
+    const assetClass = toBarAssetClass(spec.assetClass)
+    const ticker = toTvTicker(spec.pair, assetClass)
+    if (!ticker) return null
+    try {
+      return await feed.getQuote(ticker, interval, now())
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * History + live tail for ONE interval.
+   *
+   * Every candle it returns is labelled with this interval, which is what lets
+   * the evaluator's per-rule timeframe filter select it.
+   */
+  const candlesForInterval = async (
+    spec: WatchSpec,
+    ref: WatchBarRef,
+    interval: string,
+    nowMs: number,
+  ): Promise<{ candles: WatchCandle[]; live: import('../../domain/market-data/tv-feed/index.js').TvLiveQuote | null }> => {
+    const live = await tryLiveQuote(spec, interval)
+
+    let history: WatchCandle[] = []
     try {
       const result = await deps.barService.getBars(
         ref,
-        { interval: spec.timeframe, count: BAR_COUNT },
+        { interval, count: BAR_COUNT },
       )
-      const bars = result.bars
-      if (bars.length === 0) {
-        deps.logger.warn('watch.snapshot_empty', { pair: spec.pair, barId: 'barId' in ref ? ref.barId : ref.symbol, interval: spec.timeframe })
-        return null
-      }
-      const candles = toWatchCandles(bars, spec.timeframe, nowMs)
-      // Live price = the most recent bar's close. Intraday sources refresh the
-      // forming bar, so this tracks the market between candle closes.
-      const last = candles[candles.length - 1]
-      return {
-        pair: spec.pair,
-        assetClass: spec.assetClass,
-        price: last.close,
-        timestamp: new Date(nowMs).toISOString(),
-        timeframe: spec.timeframe,
-        candles,
-      }
+      history = toWatchCandles(result.bars, interval, nowMs)
     } catch (err) {
-      deps.logger.warn('watch.snapshot_failed', {
+      // History is a nice-to-have on the live path: a level rule can be
+      // evaluated from the live candle alone. Never let it veto the quote.
+      deps.logger.warn('watch.snapshot_history_failed', {
+        pair: spec.pair,
+        interval,
+        err: err instanceof Error ? err.message : String(err),
+      })
+    }
+
+    if (!live) return { candles: history, live: null }
+
+    // Order matters: fold the CLOSED candle into history first, then the
+    // forming tail. Doing it the other way round would drop the older close,
+    // because `mergeLiveCandle` discards anything behind its live candle.
+    let candles = history
+    if (live.lastClosed) {
+      const closedSpan = timeframeMs(interval)
+      const closedEnded = closedSpan > 0 && live.lastClosed.timeMs + closedSpan <= nowMs
+      candles = mergeLiveCandle(candles, {
+        timestamp: new Date(live.lastClosed.timeMs).toISOString(),
+        open: live.lastClosed.open,
+        high: live.lastClosed.high,
+        low: live.lastClosed.low,
+        close: live.lastClosed.close,
+        volume: live.lastClosed.volume,
+        timeframe: interval,
+        // The feed said final; still require the period to have elapsed locally
+        // so a replayed close cannot fire a rule early.
+        confirmed: closedEnded,
+      })
+    }
+    candles = mergeLiveCandle(candles, liveToWatchCandle(live, interval, nowMs))
+
+    return { candles, live }
+  }
+
+  return async (spec) => {
+    const nowMs = now()
+    const ref = resolveWatchRef(spec)
+    const intervals = requiredSnapshotIntervals(spec)
+
+    const results = await Promise.all(
+      intervals.map((interval) => candlesForInterval(spec, ref, interval, nowMs)),
+    )
+
+    // `price` drives every level/zone rule, so it must come from the watcher's
+    // OWN timeframe. A live quote on a secondary interval is only a fallback.
+    const primaryIndex = intervals.indexOf((spec.timeframe ?? '').trim())
+    const primary = primaryIndex >= 0 ? results[primaryIndex] : results[0]
+    const liveForPrice = primary?.live
+      ?? results.find((r) => r.live)?.live
+      ?? null
+
+    const candles: WatchCandle[] = []
+    let lastHistoryClose: number | null = null
+    for (const result of results) {
+      candles.push(...result.candles)
+      const last = result.candles[result.candles.length - 1]
+      if (last && typeof last.close === 'number') lastHistoryClose = last.close
+    }
+
+    const price = liveForPrice?.close ?? lastHistoryClose
+    if (price === null || !Number.isFinite(price)) {
+      deps.logger.warn('watch.snapshot_empty', {
         pair: spec.pair,
         barId: 'barId' in ref ? ref.barId : ref.symbol,
         interval: spec.timeframe,
-        err: err instanceof Error ? err.message : String(err),
       })
       return null
+    }
+
+    // Record WHICH path served this price. `tryLiveQuote` returns null for every
+    // abnormal case (feed off, class not allowed, unmapped symbol, stale, or
+    // simply no bar yet), so a null here means "vendor" — and when the feed WAS
+    // eligible, that is a fallback worth reporting rather than hiding.
+    const feedEligible = Boolean(deps.tvFeed)
+      && (deps.tvFeedAssetClasses ?? ['crypto', 'forex']).includes(spec.assetClass)
+    const priceSource: WatchPriceSource = liveForPrice
+      ? { kind: 'tv-feed', ref: liveForPrice.symbol }
+      : {
+          kind: 'vendor',
+          ref: 'barId' in ref ? ref.barId : ref.symbol,
+          ...(feedEligible ? { fellBack: true } : {}),
+        }
+
+    return {
+      pair: spec.pair,
+      assetClass: spec.assetClass,
+      price,
+      timestamp: new Date(nowMs).toISOString(),
+      timeframe: spec.timeframe,
+      candles,
+      priceSource,
     }
   }
 }

@@ -920,6 +920,8 @@ export interface SpawnOptions {
    * the adapter's interactive `composeCommand`; ignored when `resume` is set.
    */
   readonly initialPrompt?: string;
+  /** Ask the new Session to take over watched Issues whose owner is gone. */
+  readonly adoptOrphanedWatches?: boolean;
 }
 
 /** Secret-free product-Session birth stamp (mirrors backend SessionCreatedBy). */
@@ -1058,6 +1060,7 @@ export async function spawnSession(
   if (opts.resumeId !== undefined) body['resumeId'] = opts.resumeId;
   if (opts.agent !== undefined) body['agent'] = opts.agent;
   if (opts.initialPrompt !== undefined) body['initialPrompt'] = opts.initialPrompt;
+  if (opts.adoptOrphanedWatches === true) body['adoptOrphanedWatches'] = true;
   const res = await fetch(
     `/api/workspaces/${encodeURIComponent(id)}/sessions/spawn`,
     {
@@ -1489,6 +1492,26 @@ export async function deleteSession(wsId: string, sessionId: string): Promise<bo
     { method: 'DELETE' },
   );
   return res.ok;
+}
+
+/**
+ * Delete a product Session by its `resumeId`. Issue surfaces never receive
+ * launcher record ids, so this is the handle-only sibling of
+ * {@link deleteSession}. Unlike that route it never stops a live turn: a
+ * Session that is currently replying is refused.
+ */
+export async function deleteSessionByResumeId(wsId: string, resumeId: string): Promise<void> {
+  const res = await fetch(
+    `/api/workspaces/${encodeURIComponent(wsId)}/resumes/${encodeURIComponent(resumeId)}`,
+    { method: 'DELETE' },
+  );
+  if (res.ok) return;
+  const body = await res.json().catch(() => null) as { error?: unknown; message?: unknown } | null;
+  throw new Error(
+    typeof body?.message === 'string' && body.message.length > 0
+      ? body.message
+      : `delete failed: ${res.status}`,
+  );
 }
 
 export async function deleteWorkspace(id: string): Promise<boolean> {

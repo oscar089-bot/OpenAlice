@@ -122,7 +122,16 @@ export interface ScheduleScannerDeps {
     taskId: string
     resumeId: string
     agent: string
+    /** True when the previous owner was deleted and is being replaced. */
+    replacingDeletedOwner?: boolean
   }) => Promise<void>
+  /** False when an exact owner can no longer be continued (deleted/retired). */
+  isSessionContinuable?: (resumeId: string) => boolean
+  /** Runtime of a non-continuable owner, reused by its replacement. */
+  sessionFallback?: (resumeId: string) => {
+    agent?: string
+    selection?: SessionRuntimeSelection
+  } | undefined
   /** Observe direct Issue file edits during the scanner's normal live read. */
   observeIssues?: (workspace: WorkspaceMeta, issues: readonly IssueRecord[]) => Promise<void>
   /** Reconcile Workspace-owned Session config files on the infrastructure tick. */
@@ -135,6 +144,25 @@ export interface ScheduleScannerDeps {
   intervalMs?: number
 }
 
+/** A watcher fire parked because its owner was busy. Replayed verbatim. */
+interface PendingWatchFire {
+  prompt: string
+  conditionKey: string
+  eventType: string
+  watchRetries?: number
+  parkedAt: number
+}
+
+/**
+ * How many distinct fires one Issue may have parked at once.
+ *
+ * Two watchers firing together, or one firing while the first analysis is still
+ * running, are the normal cases and must both survive. This cap only stops a
+ * permanently wedged owner from growing an unbounded backlog; the oldest entry
+ * is dropped with a loud log rather than silently.
+ */
+const MAX_PENDING_WATCH_FIRES = 5
+
 export class ScheduleScanner {
   private timer: ReturnType<typeof setTimeout> | null = null
   private stopped = false
@@ -143,6 +171,18 @@ export class ScheduleScanner {
    * only a dispatch-start lock, not a per-Workspace execution lock. */
   private readonly dispatchingIssues = new Set<string>()
   private readonly pendingFires = new Map<string, Promise<void>>()
+  /**
+   * Watch fires whose owner was still working when the market event arrived.
+   *
+   * A watcher fire is a market fact, not a request that can be retried later:
+   * the alert was already pushed to the operator, so dropping the run would
+   * leave them with "condition fired" and no analysis. Parking preserves the
+   * authored wake prompt verbatim and replays it the moment the owner is free.
+   *
+   * FIFO per Issue, because two distinct conditions deserve two analyses;
+   * bounded, because a wedged owner must not accumulate work forever.
+   */
+  private readonly pendingWatchFires = new Map<string, PendingWatchFire[]>()
 
   async waitForDispatches(): Promise<void> { await Promise.allSettled(this.pendingFires.values()) }
   /** Snapshot built as a side-effect of each scan; null until the first scan. */
@@ -257,28 +297,131 @@ export class ScheduleScanner {
     prompt: string
     conditionKey: string
     eventType: string
-  }): Promise<{ taskId: string; resumeId: string }> {
+    /** Continuation attempts already spent for this fire. */
+    watchRetries?: number
+  }): Promise<{ taskId: string; resumeId: string } | null> {
     const ws = this.deps.registry.get(input.workspaceId)
     if (!ws) throw new Error('Workspace not found.')
     const read = await readWorkspaceIssues(ws.dir)
     const live = read.ok ? read.issues.find((issue) => issue.id === input.issueId) : undefined
     if (!live) throw new Error('Issue not found.')
-    return this.dispatchIssue(
-      ws,
-      input.issueId,
-      input.prompt,
-      live.agent,
-      issueRunOverrides(live),
-      issueAssigneeResumeId(live.assignee) ?? undefined,
-      issueAssigneeClaimsFirstSession(live.assignee),
-      issueRunTimeoutMs(live),
-      live.connectorDesk,
-      true,
-      undefined,
-      undefined,
-      undefined,
-      { conditionKey: input.conditionKey, eventType: input.eventType },
-    )
+
+    // The owner is mid-run. That is not a failure — the market fired during work
+    // the operator already asked for. Park the authored prompt and replay it on
+    // completion; returning normally tells the caller the fire was not lost.
+    const dispatchKey = `${ws.id}:${input.issueId}`
+    if (this.dispatchingIssues.has(dispatchKey) || this.deps.isIssueRunning?.(ws.id, input.issueId)) {
+      this.parkWatchFire(input)
+      return null
+    }
+
+    try {
+      return await this.dispatchIssue(
+        ws,
+        input.issueId,
+        input.prompt,
+        live.agent,
+        issueRunOverrides(live),
+        issueAssigneeResumeId(live.assignee) ?? undefined,
+        issueAssigneeClaimsFirstSession(live.assignee),
+        issueRunTimeoutMs(live),
+        live.connectorDesk,
+        true,
+        undefined,
+        undefined,
+        undefined,
+        {
+          conditionKey: input.conditionKey,
+          eventType: input.eventType,
+          ...(input.watchRetries ? { watchRetries: input.watchRetries } : {}),
+        },
+      )
+    } catch (err) {
+      // `already_running` can still surface from the guard inside dispatchIssue
+      // when the run started between our check and the exclusion. Park in that
+      // case too: a lost fire is exactly the failure mode this exists to stop.
+      if (err instanceof ScheduledIssueRunNowError && err.code === 'already_running') {
+        this.parkWatchFire(input)
+        return null
+      }
+      throw err
+    }
+  }
+
+  private parkWatchFire(input: {
+    workspaceId: string
+    issueId: string
+    prompt: string
+    conditionKey: string
+    eventType: string
+    watchRetries?: number
+  }): void {
+    const key = `${input.workspaceId}:${input.issueId}`
+    const queue = this.pendingWatchFires.get(key) ?? []
+    queue.push({
+      prompt: input.prompt,
+      conditionKey: input.conditionKey,
+      eventType: input.eventType,
+      ...(input.watchRetries ? { watchRetries: input.watchRetries } : {}),
+      parkedAt: this.now(),
+    })
+    while (queue.length > MAX_PENDING_WATCH_FIRES) {
+      const dropped = queue.shift()
+      this.deps.logger.warn('schedule.watch_fire_dropped', {
+        wsId: input.workspaceId,
+        issueId: input.issueId,
+        conditionKey: dropped?.conditionKey,
+        parkedForMs: dropped ? this.now() - dropped.parkedAt : undefined,
+      })
+    }
+    this.pendingWatchFires.set(key, queue)
+    this.deps.logger.info('schedule.watch_fire_parked', {
+      wsId: input.workspaceId,
+      issueId: input.issueId,
+      conditionKey: input.conditionKey,
+      pending: queue.length,
+    })
+  }
+
+  /** Fires parked for an Issue while its owner was busy. */
+  hasPendingWatchFire(wsId: string, issueId: string): boolean {
+    return (this.pendingWatchFires.get(`${wsId}:${issueId}`)?.length ?? 0) > 0
+  }
+
+  /**
+   * Replay parked watch fires after their owner finished a run.
+   *
+   * Called on run completion. One fire is released at a time: the released fire
+   * starts a new run, whose own completion drains the next entry. Draining in a
+   * loop would stack several analyses onto the same Session at once, which is
+   * the same double-run hazard the park exists to avoid.
+   */
+  async drainWatchFires(wsId: string, issueId: string): Promise<boolean> {
+    const key = `${wsId}:${issueId}`
+    const queue = this.pendingWatchFires.get(key)
+    const next = queue?.[0]
+    if (!queue || !next) return false
+    if (this.deps.isIssueRunning?.(wsId, issueId)) return false
+    queue.shift()
+    if (queue.length === 0) this.pendingWatchFires.delete(key)
+    this.deps.logger.info('schedule.watch_fire_replayed', {
+      wsId,
+      issueId,
+      conditionKey: next.conditionKey,
+      parkedForMs: this.now() - next.parkedAt,
+      remaining: queue.length,
+    })
+    try {
+      await this.runWatchFire({ workspaceId: wsId, issueId, ...next })
+    } catch (err) {
+      this.deps.logger.warn('schedule.watch_fire_replay_failed', { wsId, issueId, err })
+      // Put it back at the front: the analysis is still owed to the operator.
+      const requeued = this.pendingWatchFires.get(key) ?? []
+      requeued.unshift(next)
+      this.pendingWatchFires.set(key, requeued)
+      return false
+    }
+    return true
   }
 
   private arm(): void {
@@ -521,6 +664,21 @@ export class ScheduleScanner {
           what = `Issue ${issueId}: ${live.title}\n${live.what}\n\nHistory: .alice/issues/${issueId}.comments.json\n\n${what}`
         }
       }
+      // A deleted (or otherwise non-continuable) owner is not an error the user
+      // can act on. The desk's next message should recruit a replacement that
+      // keeps working, so inherit the old Session's agent + runtime and rewrite
+      // the Issue assignee to the Session this dispatch allocates. Without this
+      // a delete left the Issue pointing at a dead handle, and every following
+      // message failed with "Could not reach an Agent: deleted-session".
+      let replacingDeletedOwner = false
+      if (resumeId && this.deps.isSessionContinuable?.(resumeId) === false) {
+        const fallback = this.deps.sessionFallback?.(resumeId)
+        if (fallback?.agent) agentId = fallback.agent
+        if (fallback?.selection) selection = fallback.selection
+        resumeId = undefined
+        replacingDeletedOwner = true
+        claimFreshSession = true
+      }
       const executionWorkspace = resumeId
         ? this.resolveResumeWorkspace(resumeId)
         : issueWorkspace
@@ -652,6 +810,7 @@ export class ScheduleScanner {
             taskId: result.taskId,
             resumeId: result.resumeId,
             agent: adapter.id,
+            ...(replacingDeletedOwner ? { replacingDeletedOwner } : {}),
           })
         } catch (err) {
           // The worker is already running. Treat a claim-write failure as a

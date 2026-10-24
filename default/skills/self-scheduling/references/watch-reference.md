@@ -36,9 +36,48 @@ vendor as a literal ticker and fails every poll with *"symbol may be delisted"*.
 | `commodity` / `index` | ticker or source barId | `XAUUSD=X` | — |
 
 \* `BTC-USD` **is** accepted for crypto and widened to `BTC-USDT` (OKX spot is
-USDT-quoted), but prefer `BTC-USDT`. Crypto is priced from the keyless OKX feed;
-yfinance's `SOL-USD` is a different symbol space and is not the venue a crypto
-trader executes on.
+USDT-quoted), but prefer `BTC-USDT`. `yfinance`'s `SOL-USD` is a different
+symbol space and is not the venue a crypto trader executes on.
+
+### Live pricing
+
+Crypto and forex watchers are priced from the local **TradingView live feed**
+when it is running: real-time push data instead of a delayed vendor snapshot.
+This is transparent — the `pair` syntax above is unchanged, and when the feed is
+off or disconnected the watcher silently falls back to the delayed vendor feed.
+Do not write a different symbol to "use the live feed"; there is no such switch
+per watcher.
+
+Equity, commodity, and index watchers always use the federated bar layer.
+
+## Candle timeframes (`candle_close`)
+
+`candle_close` reads a **specific timeframe**, taken from the RULE's own
+`timeframe` field, falling back to the watch's top-level `timeframe`. Write it
+explicitly whenever they differ:
+
+```yaml
+watch:
+  timeframe: 1h          # drives price_breaks_level / zone rules
+  rules:
+    - { type: candle_close, timeframe: 15m, side: above, level: 110000 }
+```
+
+That fires on a **15-minute** close, not a 1h close. Alice fetches every
+distinct timeframe the rules name, so a 15m rule inside a 1h watcher receives
+real 15m candles rather than being starved of data.
+
+Rules:
+
+- Only **confirmed** candles count. A candle that closes at or before the
+  arming time is ignored, so re-arming never replays history.
+- Confirmation requires the period to have **actually elapsed**. A re-subscribe
+  can replay a just-closed period, so a premature close signal is downgraded
+  and the rule waits for the real close.
+- Use the same `timeframe` for a rule as the structure it is judging. A 15m
+  reclaim is a 15m rule; a 4h breakdown is a 4h rule.
+- Every timeframe costs one fetch per tick, so keep the set small (two or three
+  at most).
 
 **Do not guess the exact pair.** Confirm it with `alice market search-bars
 --query SOL`, then drop the `source|` prefix when you write `pair`.

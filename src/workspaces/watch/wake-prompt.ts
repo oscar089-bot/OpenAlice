@@ -91,6 +91,14 @@ export function buildWatchWakePrompt(
       'Re-analyse the setup against the event above, then report your conclusion to the user.',
       'If the thesis still applies, rewrite this Issue with the next deterministic condition',
       'so the watcher can be re-armed for the next phase. Otherwise mark the Issue done.',
+      '',
+      // A watcher run is headless: its final assistant text lands in the run
+      // record, which no chat reads. Without an explicit Inbox push the owner
+      // never learns the re-analysis happened, and a silent failure is
+      // indistinguishable from a quiet market.
+      'This run is headless, so your reply does not reach the user on its own.',
+      'You MUST publish your conclusion with `alice inbox push --body "<your analysis>"`',
+      'before you finish. A run that ends without an Inbox push is treated as incomplete.',
     )
   } else {
     header.push(
@@ -98,6 +106,10 @@ export function buildWatchWakePrompt(
       'If the thesis still applies, rewrite this Issue with the next deterministic condition',
       'so the watcher can be re-armed for the next phase. Otherwise mark the Issue done.',
       'Do not place orders or imply execution.',
+      '',
+      'This run is headless, so your reply does not reach the user on its own.',
+      'You MUST publish your conclusion with `alice inbox push --body "<your analysis>"`',
+      'before you finish. A run that ends without an Inbox push is treated as incomplete.',
     )
   }
 

@@ -270,6 +270,22 @@ describe('candle-close trigger progress', () => {
     expect(progress.need).toContain('need -')
   })
 
+  // A confirmed close sitting almost ON the level is not a usable baseline: its
+  // span is smaller than the remaining distance, so the old ratio clamped to a
+  // flat 0% for the whole final approach. Proximity to the level must still
+  // register, and must rise monotonically as price closes in.
+  it('does not pin the bar at 0% when the last close sits on the level', () => {
+    const spec = candleSpec('above', 110_000)
+    const state = { lastConfirmedCandle: { timestamp: NOW, close: 109_990 } }
+
+    const far = watcherTriggerProgress(spec, state, 109_900, '110000', 'above')
+    const near = watcherTriggerProgress(spec, state, 109_990, '110000', 'above')
+
+    expect(far.percent).toBeGreaterThan(0)
+    expect(near.percent).toBeGreaterThan(far.percent)
+    expect(near.percent).toBeLessThan(100)
+  })
+
   // A live price beyond the level is a FORMING candle. It must never claim a
   // fire, because the candle can still close back inside.
   it('caps a forming candle beyond the level at 99%, for either side', () => {

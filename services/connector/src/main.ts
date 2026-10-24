@@ -59,6 +59,7 @@ export async function startConnectorService(): Promise<void> {
     sessionModel: async (id, request) => JSON.parse(await fetchAliceJson(`/cli/connector-model/${encodeURIComponent(id)}`, request)),
     stopDeskRun: async (id) => JSON.parse(await fetchAliceJson(`/cli/connector-stop/${encodeURIComponent(id)}`, {})),
     newDeskSession: async (id) => JSON.parse(await fetchAliceJson(`/cli/connector-new-session/${encodeURIComponent(id)}`, {})),
+    sessionDesk: async (id, request) => JSON.parse(await fetchAliceJson(`/cli/connector-sessions/${encodeURIComponent(id)}`, request)),
     renderMarket: fetchMarketChart,
     updateAdapterSettings: (id, patch) => configStore.patchAdapter(id, patch),
   })

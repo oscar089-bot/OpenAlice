@@ -68,12 +68,26 @@ function decodeState(value: unknown, fallbackArmedAt: string): WatchState {
       ...(c.confirmed === false ? { confirmed: false } : {}),
     }
   }
+  const priceSource = (key: string): WatchState['lastPriceSource'] => {
+    const v = raw[key]
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return null
+    const s = v as Record<string, unknown>
+    const kind = s['kind']
+    if (kind !== 'tv-feed' && kind !== 'vendor') return null
+    if (typeof s['ref'] !== 'string') return null
+    return {
+      kind,
+      ref: s['ref'],
+      ...(s['fellBack'] === true ? { fellBack: true } : {}),
+    }
+  }
   return {
     armedAt: str('armedAt') ?? fallbackArmedAt,
     specFingerprint: str('specFingerprint'),
     lastChecked: str('lastChecked'),
     lastPrice: num('lastPrice'),
     lastMarketTimestamp: str('lastMarketTimestamp'),
+    lastPriceSource: priceSource('lastPriceSource'),
     lastConfirmedCandle: candle('lastConfirmedCandle'),
     previousConfirmedCandle: candle('previousConfirmedCandle'),
     lastEvent: str('lastEvent'),

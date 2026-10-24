@@ -103,6 +103,14 @@ export interface IProvenanceStore {
   ): Promise<ProvenanceRecord>
   list(query?: ProvenanceQuery): ProvenanceRecord[]
   latest(query: ProvenanceQuery): ProvenanceRecord | null
+  /** Permanently drop every edge attributed to one product Session.
+   *
+   * Deleting a Session is meant to remove its words from the artifact, not
+   * merely hide them: the same records feed the model's prompt, so a soft
+   * filter here would leave a deleted conversation readable by the next turn.
+   * Optional so lightweight test doubles that only read do not have to
+   * implement a destructive write. Returns the number of removed records. */
+  removeBySession?(resumeId: string): Promise<number>
 }
 
 interface LoggerLike {
@@ -187,6 +195,17 @@ export class ArtifactProvenanceStore implements IProvenanceStore {
 
   latest(query: ProvenanceQuery): ProvenanceRecord | null {
     return this.list({ ...query, limit: 1 })[0] ?? null
+  }
+
+  async removeBySession(resumeId: string): Promise<number> {
+    const kept = this.records.filter(
+      (record) => !(record.origin.kind === 'session' && record.origin.resumeId === resumeId),
+    )
+    const removed = this.records.length - kept.length
+    if (removed === 0) return 0
+    this.records = kept
+    await this.flush()
+    return removed
   }
 
   private async flush(): Promise<void> {

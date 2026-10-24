@@ -1269,6 +1269,15 @@ export const workspacesHandlers = [
     demoSessionPresence.set(webKey(String(params.id), resumeId), presence)
     return HttpResponse.json({ resumeId, presence, lifecycle: 'active' })
   }),
+  http.delete('/api/workspaces/:id/resumes/:resumeId', ({ params }) => {
+    const resumeId = String(params.resumeId)
+    const key = webKey(String(params.id), resumeId)
+    if (demoSessionPresence.get(key) === 'deleted') {
+      return HttpResponse.json({ error: 'resume_not_found', message: 'resume conversation not found' }, { status: 404 })
+    }
+    demoSessionPresence.set(key, 'deleted')
+    return HttpResponse.json({ ok: true, resumeId, presence: 'deleted' })
+  }),
   http.get('/api/workspaces/:id/resumes', ({ params, request }) => {
     const requestedResume = new URL(request.url).searchParams.get('resumeId')
     const wsId = String(params.id)
@@ -1298,27 +1307,31 @@ export const workspacesHandlers = [
         issueId?: string
         assistantPreview?: string
       }
-    }> = (workspace?.sessions ?? []).map((session) => ({
-      resumeId: session.resumeId,
-      displayName: session.displayName,
-      agent: session.agent,
-      createdAt: Date.parse(session.createdAt),
-      updatedAt: Date.parse(session.lastActiveAt),
-      lifecycle: 'active',
-      resumable: session.agent !== 'shell',
-      active: session.state === 'running',
-      runtime: demoResumeRuntimes.get(session.resumeId) ?? session.runtime,
-      ...(session.surface === 'headless'
-        ? {}
-        : {
-            interactive: {
-              name: session.name,
-              ...(session.title ? { title: session.title } : {}),
-              state: session.state,
-              lastActiveAt: session.lastActiveAt,
-            },
-          }),
-    }))
+    }> = (workspace?.sessions ?? []).map((session) => {
+      const presence = demoSessionPresence.get(webKey(wsId, session.resumeId)) ?? session.presence
+      return {
+        resumeId: session.resumeId,
+        displayName: session.displayName,
+        agent: session.agent,
+        createdAt: Date.parse(session.createdAt),
+        updatedAt: Date.parse(session.lastActiveAt),
+        lifecycle: 'active' as const,
+        ...(presence ? { presence } : {}),
+        resumable: session.agent !== 'shell',
+        active: session.state === 'running',
+        runtime: demoResumeRuntimes.get(session.resumeId) ?? session.runtime,
+        ...(session.surface === 'headless'
+          ? {}
+          : {
+              interactive: {
+                name: session.name,
+                ...(session.title ? { title: session.title } : {}),
+                state: session.state,
+                lastActiveAt: session.lastActiveAt,
+              },
+            }),
+      }
+    })
     if (demoTakeover && demoTakeover.workspaceId === wsId && ['running', 'completed'].includes(demoTakeover.state)) {
       const row = sessions.find(session => session.resumeId === demoTakeover!.resumeId)
       if (row) row.latestExecution = { taskId: 'demo-takeover-run', status: demoTakeover.state === 'running' ? 'running' : 'done', startedAt: demoTakeoverStarted, issueId: demoTakeover.origin.issueId,

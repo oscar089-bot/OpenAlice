@@ -13,7 +13,7 @@
 import { tool } from 'ai'
 import { z } from 'zod'
 import type { QueryExecutor } from '@traderalice/opentypebb'
-import { listMarketVendors, setMarketVendor } from '@/domain/market-data/vendors.js'
+import { describeLiveFeed, listMarketVendors, setMarketVendor } from '@/domain/market-data/vendors.js'
 
 export function createVendorTools(executor: QueryExecutor) {
   return {
@@ -21,12 +21,20 @@ export function createVendorTools(executor: QueryExecutor) {
       description: `List the market-data vendors available for symbol search, each with its
 on/off state and a usage note (what it covers, symbol convention, search-language quirks).
 
+Also returns \`liveFeed\`: whether real-time TradingView push pricing is active for watchers
+(crypto + forex). Watchers on those classes are ALREADY priced live — do not tell a user
+their watcher is on delayed data without checking this field, and do not change the pair
+syntax to "use" it.
+
 Reach for this FIRST when a marketSearchForResearch / searchBars comes up empty, or before
 working a market you haven't queried (CN A-shares, Taiwan, etc.) — it tells you which vendor
 covers it and how to address symbols. If the right vendor is off, turn it on with
 setMarketVendor; the change is live immediately, no restart.`,
       inputSchema: z.object({}).meta({ examples: [{}] }),
-      execute: async () => ({ vendors: await listMarketVendors(executor) }),
+      execute: async () => ({
+        vendors: await listMarketVendors(executor),
+        liveFeed: await describeLiveFeed(),
+      }),
     }),
 
     setMarketVendor: tool({

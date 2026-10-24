@@ -77,6 +77,8 @@ export type {
   WalletCommitLog,
   ReconnectResult,
   McpConfig,
+  ExternalMcpServer,
+  TvFeedConfig,
   NewsCollectorConfig,
   NewsCollectorFeed,
   ToolCallRecord,
@@ -107,6 +109,7 @@ export type {
   TelegramConnectorDeskSnapshot,
 } from './connectors'
 export type { ToolCallQueryResult } from './agentStatus'
+export type { ExternalMcpProbeResult } from './config'
 export type {
   AgentConversationQueryResult,
   AgentConversationRecord,

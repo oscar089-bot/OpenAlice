@@ -56,6 +56,9 @@ export type HeadlessTaskTriggerMetadata =
       readonly kind: 'watch'
       readonly conditionKey: string
       readonly eventType: string
+      /** Continuation attempts already spent because a run ended without an
+       *  Inbox push. Bounded so a model that keeps failing cannot spin forever. */
+      readonly watchRetries?: number
     }
 
 export type HeadlessTaskTrigger = {

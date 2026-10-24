@@ -113,6 +113,7 @@ export function toBoardItem(input: {
       lastChecked: state.lastChecked,
       lastPrice: state.lastPrice,
       lastMarketTimestamp: state.lastMarketTimestamp,
+      lastPriceSource: state.lastPriceSource ?? null,
       lastConfirmedCandle: state.lastConfirmedCandle,
       previousConfirmedCandle: state.previousConfirmedCandle,
       terminal: state.terminal,

@@ -11,6 +11,7 @@ import { join } from 'node:path';
 
 import { createWorkspaceRoutes } from './workspaces.js';
 import { HeadlessCapacityError, HeadlessResumeError, type WorkspaceService } from '../../workspaces/service.js';
+import { ResumePresenceError } from '../../workspaces/resume-registry.js';
 import { TemplateUpgradeError } from '../../workspaces/template-upgrade.js';
 import { WorkspaceAbsorbError } from '../../workspaces/workspace-absorb.js';
 import { HarnessSourceUpgradeError } from '../../workspaces/harness-source-upgrade.js';
@@ -414,6 +415,64 @@ describe('DELETE /:id/sessions/:sid', () => {
       sessionRecordId: 'claude-calm-seat',
       surface: 'terminal',
       status: 'interrupted',
+    })
+  })
+})
+
+describe('DELETE /:id/resumes/:resumeId', () => {
+  it('soft-deletes the product Session behind a resumeId', async () => {
+    const deleteSessionPresence = vi.fn(async (input: any) => ({
+      resumeId: input.resumeId,
+      wsId: input.wsId,
+      agent: 'claude',
+      createdAt: 1,
+      updatedAt: 2,
+      lifecycle: 'active',
+      presence: 'deleted',
+    }))
+    const { app } = build({ deleteSessionPresence })
+
+    const res = await app.request('/ws-1/resumes/resume-1', { method: 'DELETE' })
+
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({
+      ok: true,
+      resumeId: 'resume-1',
+      presence: 'deleted',
+    })
+    expect(deleteSessionPresence).toHaveBeenCalledWith({
+      wsId: 'ws-1',
+      resumeId: 'resume-1',
+    })
+  })
+
+  it('refuses to delete a Session with a running turn', async () => {
+    const deleteSessionPresence = vi.fn(async () => {
+      throw new HeadlessResumeError('busy', 'this conversation already has a running turn')
+    })
+    const { app } = build({ deleteSessionPresence })
+
+    const res = await app.request('/ws-1/resumes/resume-1', { method: 'DELETE' })
+
+    expect(res.status).toBe(409)
+    expect(await res.json()).toEqual({
+      error: 'resume_busy',
+      message: 'this conversation already has a running turn',
+    })
+  })
+
+  it('reports an unknown resumeId', async () => {
+    const deleteSessionPresence = vi.fn(async () => {
+      throw new ResumePresenceError('not_found', 'resume conversation not found')
+    })
+    const { app } = build({ deleteSessionPresence })
+
+    const res = await app.request('/ws-1/resumes/resume-404', { method: 'DELETE' })
+
+    expect(res.status).toBe(404)
+    expect(await res.json()).toEqual({
+      error: 'resume_not_found',
+      message: 'resume conversation not found',
     })
   })
 })

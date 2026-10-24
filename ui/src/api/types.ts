@@ -221,14 +221,37 @@ export interface AppConfig {
     every: string
   }
   mcp: McpConfig
+  tvFeed: TvFeedConfig
   ports: { web: number }
   [key: string]: unknown
+}
+
+/** A third-party MCP server Alice connects to as a CLIENT. */
+export interface ExternalMcpServer {
+  id: string
+  name: string
+  command: string
+  args: string[]
+  env: Record<string, string>
+  cwd?: string
+  enabled: boolean
 }
 
 /** MCP server config exports OpenAlice's ToolCenter to external clients. */
 export interface McpConfig {
   enabled: boolean
   port: number
+  /** External servers Alice consumes. Empty until the user adds one. */
+  externalServers: ExternalMcpServer[]
+}
+
+/** Live TradingView feed used for watcher-grade realtime quotes. */
+export interface TvFeedConfig {
+  enabled: boolean
+  url: string
+  assetClasses: Array<'crypto' | 'forex'>
+  staleMs: number
+  subscribeTimeoutMs: number
 }
 
 // ==================== News Collector ====================

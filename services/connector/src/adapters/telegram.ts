@@ -1,6 +1,7 @@
 import { TelegramModelControls } from './telegram-model.js'
+import { TelegramSessionControls } from './telegram-session.js'
 import { createHash } from 'node:crypto'
-import { Bot, GrammyError, InlineKeyboard, InputFile, type Context } from 'grammy'
+import { Bot, InlineKeyboard, InputFile, type Context } from 'grammy'
 import { autoRetry } from '@grammyjs/auto-retry'
 import type {
   ConnectorAdapterConfig,
@@ -311,12 +312,17 @@ export class TelegramConnectorAdapter implements ConnectorAdapter {
   }
 
   /**
-   * Open the board, or re-adopt an already-open one.
+   * Open the board, or RE-OPEN it at the bottom of the chat.
    *
-   * This and renderBoard are the ONLY paths that touch a board message, which
-   * is what makes the board on-demand: nothing is ever posted until the
-   * operator runs /watchers. Re-adopting edits the existing message instead of
-   * sending a second one, so the chat never accumulates stale cards.
+   * The board is one message that is edited in place, which is what keeps the
+   * chat from filling with stale cards. That has one bad side effect: re-running
+   * `/watchers` after chatting edits the OLD message wherever it sits in
+   * history, so the command looks like it did nothing.
+   *
+   * So an explicit `/watchers` retires the previous message and posts a fresh
+   * one. The single live board is preserved (the old copy is deleted, not left
+   * behind), and the operator gets it back where they are looking. In-place
+   * edits remain for tick refreshes and button presses.
    */
   private async openBoard(ctx: Context): Promise<void> {
     const chatId = ctx.chat?.id
@@ -328,22 +334,16 @@ export class TelegramConnectorAdapter implements ConnectorAdapter {
       parse_mode: 'HTML' as const,
       ...(markup ? { reply_markup: markup } : {}),
     }
-    if (this.boardMessageId !== null && this.boardChatId !== null) {
-      try {
-        await ctx.api.editMessageText(this.boardChatId, this.boardMessageId, form.html, options)
-        return
-      } catch (error) {
-        // `message is not modified` means the board ALREADY shows exactly this.
-        // That is success, not failure — the operator asked for a board that is
-        // on screen. Rethrowing here is what made `/watchers` appear to do
-        // nothing whenever the live 5s tick had already drawn the current state.
-        if (isTelegramMessageNotModified(error)) return
-        // The operator deleted the board out-of-band (or Telegram discarded the
-        // id). Posting a fresh one is the honest recovery — doing nothing would
-        // look like a broken command.
-        if (!isTelegramMessageGone(error)) throw error
+
+    // Retire the previous board first. Best-effort: a board the operator already
+    // deleted, or one in a different chat, must not block the new one.
+    const previousChatId = this.boardChatId
+    const previousMessageId = this.boardMessageId
+    if (previousChatId !== null && previousMessageId !== null) {
+      await ctx.api.deleteMessage(previousChatId, previousMessageId).catch(() => undefined)
+      if (previousChatId === chatId) {
+        // Do not re-adopt the id we just deleted; wait for the new message.
         this.boardMessageId = null
-        this.boardChatId = null
       }
     }
 
@@ -648,12 +648,18 @@ export class TelegramConnectorAdapter implements ConnectorAdapter {
   }
 
   private readonly modelControls = new TelegramModelControls()
+  private readonly sessionControls = new TelegramSessionControls()
 
   private attachBot(bot: Bot, context: ConnectorAdapterContext): void {
     bot.command('model', async ctx => {
       if (ctx.chat.type !== 'private' || !this.isOwner(String(ctx.from?.id ?? ''))) return
       if (!context.sessionModel) { await ctx.reply('Model controls are unavailable. Update OpenAlice.'); return }
       await this.modelControls.open(ctx, context.sessionModel, typeof ctx.match === 'string' ? ctx.match.trim() || undefined : undefined)
+    })
+    bot.command('session', async ctx => {
+      if (ctx.chat.type !== 'private' || !this.isOwner(String(ctx.from?.id ?? ''))) return
+      if (!context.sessionDesk) { await ctx.reply('Session controls are unavailable. Update OpenAlice.'); return }
+      await this.sessionControls.open(ctx, context.sessionDesk)
     })
     bot.command('inbox', async (ctx) => {
       if (ctx.chat.type !== 'private' || !ctx.from) return
@@ -708,7 +714,7 @@ export class TelegramConnectorAdapter implements ConnectorAdapter {
     })
 
     for (const command of TELEGRAM_CONNECTOR_DEFINITION.commands) {
-      if (command.name === 'model' || command.name === 'inbox' || command.name === 'settings' || command.name === 'uta' || command.name === 'watchers' || command.name === 'watcher') continue
+      if (command.name === 'model' || command.name === 'session' || command.name === 'inbox' || command.name === 'settings' || command.name === 'uta' || command.name === 'watchers' || command.name === 'watcher') continue
       bot.command(command.name, async (ctx) => {
         if (ctx.chat.type !== 'private' || !ctx.from) return
         const handled = await context.commands.execute({
@@ -817,17 +823,6 @@ export class TelegramConnectorAdapter implements ConnectorAdapter {
         ? 'Stopping the Agent reply now.'
         : 'No Agent reply is running for this chat.')
     })
-    context.commands.register('new', async ({ userId, reply }) => {
-      if (!this.isOwner(userId)) return reply('This command is only available to the linked owner.')
-      if (!context.newDeskSession) return reply('Starting a new Session is unavailable. Update OpenAlice.')
-      const result = await context.newDeskSession()
-      if (result.started) {
-        return reply('Fresh Session ready. Your next message starts a new conversation. The previous Session is kept and still reachable in OpenAlice.')
-      }
-      await reply(result.reason === 'running'
-        ? 'An Agent reply is running. Use /stop first, then /new.'
-        : 'Could not start a new Session. Check OpenAlice logs.')
-    })
   }
 
   private async presentInbox(
@@ -910,6 +905,12 @@ export class TelegramConnectorAdapter implements ConnectorAdapter {
         await ctx.answerCallbackQuery({ text: 'Only the linked owner can change settings.' }); return
       }
       await this.modelControls.handle(ctx, context.sessionModel); return
+    }
+    if (data.startsWith('ses:')) {
+      if (ctx.chat?.type !== 'private' || !this.isOwner(String(ctx.from?.id ?? '')) || !context.sessionDesk) {
+        await ctx.answerCallbackQuery({ text: 'Only the linked owner can change Sessions.' }); return
+      }
+      await this.sessionControls.handle(ctx, context.sessionDesk); return
     }
     const utaControl = parseTelegramUtaControl(data)
     if (utaControl) {
@@ -1350,36 +1351,6 @@ function toInlineKeyboard(
 
 function sessionKey(chatId: number, messageId: number): string {
   return `${chatId}:${messageId}`
-}
-
-/**
- * True when Telegram refused an edit because nothing actually changed.
- *
- * This is a SUCCESS in disguise, not a failure: the message already carries the
- * content and markup we asked for. Treating it as an error is what made
- * `/watchers` appear broken whenever the live board was already up to date.
- */
-function isTelegramMessageNotModified(error: unknown): boolean {
-  if (!(error instanceof GrammyError)) return false
-  if (error.error_code !== 400) return false
-  return error.description.toLowerCase().includes('message is not modified')
-}
-
-/**
- * True when Telegram says the message no longer exists.
- *
- * Tells "the operator deleted the board" (recoverable: post a fresh one) apart
- * from a real failure (must surface, not silently re-post).
- */
-function isTelegramMessageGone(error: unknown): boolean {
-  if (!(error instanceof GrammyError)) return false
-  if (error.error_code === 404) return true
-  if (error.error_code !== 400) return false
-  const description = error.description.toLowerCase()
-  return description.includes('message to edit not found')
-    || description.includes('message_id_invalid')
-    || description.includes('message can not be edited')
-    || description.includes('message cant be edited')
 }
 
 function requiredString(config: ConnectorAdapterConfig, key: string): string {

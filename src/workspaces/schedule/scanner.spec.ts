@@ -148,6 +148,8 @@ function scannerFor(
     resolveAdapter?: ScheduleScannerDeps['resolveAdapter']
     resolveResumeWorkspace?: ScheduleScannerDeps['resolveResumeWorkspace']
     claimFreshSession?: ScheduleScannerDeps['claimFreshSession']
+    isSessionContinuable?: ScheduleScannerDeps['isSessionContinuable']
+    sessionFallback?: ScheduleScannerDeps['sessionFallback']
     canRetryIssueRun?: ScheduleScannerDeps['canRetryIssueRun']
     isIssueRunning?: ScheduleScannerDeps['isIssueRunning']
     observeIssues?: ScheduleScannerDeps['observeIssues']
@@ -167,6 +169,8 @@ function scannerFor(
     resolveAdapter: opts.resolveAdapter ?? (() => opts.adapter ?? headlessAdapter),
     dispatch,
     claimFreshSession: opts.claimFreshSession,
+    isSessionContinuable: opts.isSessionContinuable,
+    sessionFallback: opts.sessionFallback,
     observeIssues: opts.observeIssues,
     reconcileSessionRuntimeBindings: opts.reconcileSessionRuntimeBindings,
     markers,
@@ -258,6 +262,96 @@ describe('ScheduleScanner', () => {
     // A market fire is not a calendar occurrence. Writing the marker would
     // silently skip the Issue's next scheduled slot.
     expect(markers.get('w1', 'btc-watch')).toBeUndefined()
+  })
+
+  it('parks a watch fire while the owner is running instead of losing it', async () => {
+    const ws = await makeWs('w1', [{
+      id: 'busy-watch',
+      title: 'Busy watch',
+      what: 'Re-analyse.',
+      assignee: '@resume-owner-a1b2c3',
+    }])
+    const { scanner, dispatch } = scannerFor([ws], {
+      isIssueRunning: () => true,
+      resolveAdapter: () => headlessAdapter,
+    })
+
+    const result = await scanner.runWatchFire({
+      workspaceId: 'w1',
+      issueId: 'busy-watch',
+      prompt: 'A market watcher fired.',
+      conditionKey: 'TRIGGER_HIT:price_breaks_level:above:300',
+      eventType: 'TRIGGER_HIT',
+    })
+
+    // Parking is not an error: the fire is remembered, and nothing was dispatched
+    // on top of the run that is already working.
+    expect(result).toBeNull()
+    expect(dispatch).not.toHaveBeenCalled()
+    expect(scanner.hasPendingWatchFire('w1', 'busy-watch')).toBe(true)
+  })
+
+  it('replays a parked watch fire once the owner is free', async () => {
+    const ws = await makeWs('w1', [{
+      id: 'queued-watch',
+      title: 'Queued watch',
+      what: 'Re-analyse.',
+      assignee: '@resume-owner-a1b2c3',
+    }])
+    let busy = true
+    const { scanner, dispatch } = scannerFor([ws], {
+      isIssueRunning: () => busy,
+      resolveAdapter: () => headlessAdapter,
+    })
+
+    await scanner.runWatchFire({
+      workspaceId: 'w1',
+      issueId: 'queued-watch',
+      prompt: 'First fire.',
+      conditionKey: 'TRIGGER_HIT:above:300',
+      eventType: 'TRIGGER_HIT',
+    })
+    expect(dispatch).not.toHaveBeenCalled()
+
+    // The run finishes; the parked prompt is released verbatim.
+    busy = false
+    await expect(scanner.drainWatchFires('w1', 'queued-watch')).resolves.toBe(true)
+
+    expect(dispatch).toHaveBeenCalledOnce()
+    expect(vi.mocked(dispatch).mock.calls[0]?.[2]).toBe('First fire.')
+    expect(vi.mocked(dispatch).mock.calls[0]?.[5]).toMatchObject({
+      metadata: { kind: 'watch', conditionKey: 'TRIGGER_HIT:above:300' },
+    })
+    expect(scanner.hasPendingWatchFire('w1', 'queued-watch')).toBe(false)
+  })
+
+  it('releases one parked fire at a time so runs never stack', async () => {
+    const ws = await makeWs('w1', [{
+      id: 'two-fires',
+      title: 'Two fires',
+      what: 'Re-analyse.',
+      assignee: '@resume-owner-a1b2c3',
+    }])
+    let busy = true
+    const { scanner, dispatch } = scannerFor([ws], {
+      isIssueRunning: () => busy,
+      resolveAdapter: () => headlessAdapter,
+    })
+
+    await scanner.runWatchFire({
+      workspaceId: 'w1', issueId: 'two-fires', prompt: 'Fire A.',
+      conditionKey: 'A', eventType: 'TRIGGER_HIT',
+    })
+    await scanner.runWatchFire({
+      workspaceId: 'w1', issueId: 'two-fires', prompt: 'Fire B.',
+      conditionKey: 'B', eventType: 'TRIGGER_HIT',
+    })
+
+    busy = false
+    await scanner.drainWatchFires('w1', 'two-fires')
+    // Fire A starts a run, which makes the Issue busy again; B must wait.
+    expect(vi.mocked(dispatch).mock.calls[0]?.[2]).toBe('Fire A.')
+    expect(scanner.hasPendingWatchFire('w1', 'two-fires')).toBe(true)
   })
 
   it('routes a watch fire onto the current owner after a first-session claim', async () => {
@@ -939,8 +1033,7 @@ describe('comment owner handoff', () => {
     expect(claimFreshSession).toHaveBeenCalledTimes(1)
   })
 
-  it('excludes a scheduled fire while the comment is creating the owner', async () => {
-    const ws = await makeWs('w1', [{ id: 'desk', title: 'Desk', when: { kind: 'every', every: '4h' }, assignee: '@new-then-resume' }])
+  it('excludes a scheduled fire while the comment is creating the owner', async () => {    const ws = await makeWs('w1', [{ id: 'desk', title: 'Desk', when: { kind: 'every', every: '4h' }, assignee: '@new-then-resume' }])
     let release!: () => void
     let entered!: () => void
     const started = new Promise<void>((resolve) => { entered = resolve })
@@ -954,6 +1047,56 @@ describe('comment owner handoff', () => {
     expect(markers.get('w1', 'desk')).toBeUndefined()
     release()
     await comment
+  })
+
+  // Reported bug: deleting a desk Session left the Issue pointing at the dead
+  // handle, so the next owner message failed with "Could not reach an Agent:
+  // deleted-session". A non-continuable owner must recruit a replacement that
+  // reuses its agent + runtime and then claim the Issue.
+  it('replaces a deleted owner instead of failing the comment', async () => {
+    const spec: IssueSpec = {
+      id: 'desk',
+      title: 'Desk',
+      assignee: '@resume-deleted-owner',
+    }
+    const ws = await makeWs('w1', [spec])
+    const dispatch = vi.fn(async (
+      _meta: unknown,
+      adapter: { id: string },
+      _prompt: string,
+      _origin: unknown,
+      _timeout?: unknown,
+      _trigger?: unknown,
+      resumeId?: string,
+      _inquiry?: unknown,
+      selection?: unknown,
+    ) => ({ taskId: 'run-1', resumeId: 'resume-replacement' }))
+    const claimFreshSession = vi.fn(async () => undefined)
+    const { scanner } = scannerFor([ws], {
+      dispatch,
+      claimFreshSession,
+      isSessionContinuable: () => false,
+      sessionFallback: () => ({
+        agent: 'claude',
+        selection: { credentialSource: 'native', model: 'sonnet-5', reasoningEffort: 'high' },
+      }),
+    })
+
+    await scanner.runIssueComment({ workspaceId: 'w1', issueId: 'desk', prompt: 'Hello', commentId: 'c1' })
+
+    const call = dispatch.mock.calls[0]
+    // A fresh Session, not the deleted handle.
+    expect(call[6]).toBeUndefined()
+    // Inherited agent + runtime.
+    expect(call[1].id).toBe('claude')
+    expect(call[8]).toMatchObject({
+      credentialSource: 'native',
+      model: 'sonnet-5',
+      reasoningEffort: 'high',
+    })
+    expect(claimFreshSession).toHaveBeenCalledWith(
+      expect.objectContaining({ resumeId: 'resume-replacement', replacingDeletedOwner: true }),
+    )
   })
 })
 

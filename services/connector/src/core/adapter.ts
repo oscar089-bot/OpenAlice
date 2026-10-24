@@ -1,4 +1,9 @@
-import type { ConnectorModelRequest, ConnectorModelPanel } from '@traderalice/connector-protocol'
+import type {
+  ConnectorModelPanel,
+  ConnectorModelRequest,
+  ConnectorSessionPanel,
+  ConnectorSessionRequest,
+} from '@traderalice/connector-protocol'
 import type {
   ConnectorAttachment,
   ConnectorAdapterConfig,
@@ -33,6 +38,8 @@ export type ConnectorStartFailureDisposition = 'fatal' | 'retry'
 
 export interface ConnectorAdapterContext {
   sessionModel?(request: ConnectorModelRequest): Promise<ConnectorModelPanel>
+  /** Owner-facing Session roster/create/switch panel for this desk. */
+  sessionDesk?(request: ConnectorSessionRequest): Promise<ConnectorSessionPanel>
   commands: CommandRegistry
   updateSettings(patch: Record<string, string | number | boolean>): Promise<void>
   getServiceStatus(): string

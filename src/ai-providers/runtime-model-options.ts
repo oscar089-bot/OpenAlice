@@ -110,6 +110,15 @@ export function runtimeEffortOptions(input: {
   readonly semantics: ModelSemantics | null
   readonly modelKnown: boolean
   readonly model?: string | null
+  /**
+   * Return the runtime's own CLI tier list when a known model declares none.
+   *
+   * Off by default: the Chat/Model pickers must not offer a tier the provider
+   * may reject. The Session create flow opts in because a fixed CLI flag set
+   * (claude/grok/pi/omp/agy) is the runtime's real menu, and an empty step with
+   * only "Skip" is a dead screen the operator cannot act on.
+   */
+  readonly fallbackToRuntimeTiers?: boolean
 }): readonly ModelReasoningEffort[] {
   // Live Cursor Agent encodes effort in the model id (`gpt-5.2-low`).
   // Brackets and a separate effort flag both fail; do not show a fake scale.
@@ -118,7 +127,7 @@ export function runtimeEffortOptions(input: {
   if (declared) return declared
   // A known model without provider-native effort tiers must not receive a
   // fabricated scale. Unknown/private ids preserve the runtime's native knobs.
-  if (input.modelKnown) return []
+  if (input.modelKnown && !input.fallbackToRuntimeTiers) return []
   if (input.agent === 'claude') return CLAUDE_RUNTIME_EFFORTS
   if (input.agent === 'agy') return AGY_RUNTIME_EFFORTS
   if (input.agent === 'grok') {

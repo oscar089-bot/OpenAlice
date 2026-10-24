@@ -200,6 +200,42 @@ describe('dispatchIssueCommentReply', () => {
       }),
     })
   })
+
+  // Reported bug: deleting the desk Session left the Issue pointing at the dead
+  // handle, and the next Telegram message surfaced "deleted-session" instead of
+  // recruiting a replacement. Deletion is recoverable, so it must fall through
+  // to the Issue dispatcher rather than failing the comment.
+  it('recruits a replacement when the owner was deleted', async () => {
+    const replyToIssue = vi.fn(async () => ({ taskId: 'run-replacement', resumeId: 'resume-replacement' }))
+    const control = {
+      ask: vi.fn(async () => ({
+        status: 'unavailable' as const,
+        resolution: { mode: 'unavailable' as const, reason: 'deleted-session' as const },
+      })),
+      replyToIssue,
+      read: vi.fn(),
+    } as unknown as WorkspaceConversationControl
+
+    expect(await dispatchIssueCommentReply({
+      conversation: control,
+      issueWorkspaceId: 'ws-home',
+      issue: issue('@resume-deleted-owner'),
+      comment,
+      source: { kind: 'human' },
+    })).toEqual({
+      status: 'scheduled',
+      delivery: {
+        state: 'pending',
+        targetResumeId: 'resume-replacement',
+        taskId: 'run-replacement',
+      },
+    })
+    expect(replyToIssue).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: 'ws-home',
+      issueId: 'audit',
+      commentId: 'comment-1',
+    }))
+  })
 })
 
 describe('recordIssueCommentReply', () => {

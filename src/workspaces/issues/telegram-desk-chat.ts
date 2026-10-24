@@ -185,7 +185,13 @@ export async function stampTelegramDeskScheduledFire(input: {
   const text = input.assistantText?.trim()
   if (!text) return null
   const triggerMetadata = input.task.trigger?.metadata
-  if (triggerMetadata?.kind !== 'connector-cron-issue') return null
+  // A phone-desk run reaches the chat through TWO triggers: the desk's own cron
+  // fire, and a deterministic market watcher on an Issue the desk owns. The
+  // watcher case used to be dropped here, so a fired watcher created a Session
+  // and produced no analysis in Telegram at all. Both are desk-originated, so
+  // both must project; anything else (a plain Issue run) still must not.
+  const fromWatch = triggerMetadata?.kind === 'watch'
+  if (!fromWatch && triggerMetadata?.kind !== 'connector-cron-issue') return null
   const workspace = input.host.getWorkspace(input.workspaceId)
   if (!workspace) return null
   const desks = await findConnectorDesks(input.host.listWorkspaces())
@@ -193,7 +199,9 @@ export async function stampTelegramDeskScheduledFire(input: {
   if (
     !desk
     || desk.issue.status === 'canceled'
-    || desk.connectorId !== triggerMetadata.connectorId
+    // A cron fire carries the connector it belongs to; a watch fire does not,
+    // so the desk itself is the routing authority there.
+    || (!fromWatch && desk.connectorId !== triggerMetadata?.connectorId)
   ) return null
 
   const appended = await appendIssueComment(

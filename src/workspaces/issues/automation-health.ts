@@ -126,11 +126,16 @@ export function issueAutomationHealth(input: IssueAutomationHealthInput): IssueA
   if (input.ownerState === 'retired') {
     return withLatest({ state: 'blocked', message: 'Assigned Session is retired. Reassign the Issue before its next run.' })
   }
-  if (input.ownerState === 'deleted') {
-    return withLatest({ state: 'blocked', message: 'Assigned Session is deleted. Reassign the Issue before its next run.' })
-  }
   if (input.ownerState === 'unbound') {
     return withLatest({ state: 'blocked', message: 'Assigned Session has no resumable runtime conversation yet.' })
+  }
+  // A deleted owner is RECOVERABLE: the next fire recruits a replacement and
+  // rewrites the Issue assignee. A live watcher therefore stays live instead of
+  // showing a red blocker for a market check that is still running fine.
+  // Missing/retired/workspace-missing owners stay hard blockers above, because
+  // those cannot self-heal.
+  if (input.ownerState === 'deleted' && !input.watch) {
+    return withLatest({ state: 'blocked', message: 'Assigned Session is deleted. Reassign the Issue before its next run.' })
   }
   if (input.ownerState === 'workspace_missing') {
     return withLatest({ state: 'blocked', message: 'Assigned Session Workspace is unavailable. Restore it or reassign the Issue before its next run.' })
@@ -161,7 +166,7 @@ export function issueAutomationHealth(input: IssueAutomationHealthInput): IssueA
     }
   }
   // A watched Issue has no calendar slot; its liveness is the watch loop. This
-  // must precede the null-`nextDueAtMs` check, which would otherwise report a
+  // precedes the null-`nextDueAtMs` check, which would otherwise report a
   // healthy watcher as a schedule with no future fire.
   if (input.watch) {
     const w = input.watch

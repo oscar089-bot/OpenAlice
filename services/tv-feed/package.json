@@ -1,0 +1,35 @@
+{
+  "name": "@traderalice/tv-feed-service",
+  "version": "0.1.0",
+  "description": "Optional TradingView realtime OHLCV feed (WebSocket) used for watcher-grade live data",
+  "private": true,
+  "main": "dist/main.js",
+  "scripts": {
+    "start": "node dist/main.js",
+    "dev": "tsx src/main.ts",
+    "test": "node examples/regression-test.js && node examples/drop-test.js && node examples/backfill-test.js && node examples/reconnect-test.js",
+    "build": "tsc --project tsconfig.json --skipLibCheck",
+    "typecheck": "tsc --project tsconfig.json --noEmit --skipLibCheck",
+    "test:ws": "node examples/websocket-client.js"
+  },
+  "dependencies": {
+    "@types/ws": "^8.18.1",
+    "axios": "^1.6.0",
+    "dotenv": "^16.5.0",
+    "express": "^5.1.0",
+    "express-ws": "^5.0.2",
+    "https-proxy-agent": "^7.0.6",
+    "jszip": "^3.10.1",
+    "prom-client": "^14.0.0",
+    "socks-proxy-agent": "^8.0.5",
+    "winston": "^3.17.0",
+    "ws": "^8.18.2"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.15.19",
+    "jest": "^29.0.0",
+    "ts-node": "^10.0.0",
+    "typescript": "^5.0.0"
+  }
+}

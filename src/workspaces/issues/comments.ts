@@ -18,6 +18,7 @@ import {
   progressChanged,
   type HeadlessTurnProgress,
 } from '../headless-progress.js'
+import { sessionSignature } from '../session-signature.js'
 import { ISSUES_DIR_REL, parseIssueContent, type IssueRecord } from './declaration.js'
 
 export interface IssueComment {
@@ -267,5 +268,40 @@ export async function updateIssueCommentProgress(
     comments[index] = comment
     await writeIssueComments(wsDir, id, comments)
     return { ok: true as const, comment, changed: true }
+  })
+}
+
+/**
+ * Permanently drop one product Session's side of an Issue conversation.
+ *
+ * Deleting a Session means removing its words, not hiding them: this sidecar is
+ * read directly into the next turn's prompt, so a display-only filter would
+ * leave the deleted conversation readable by the model.
+ *
+ * Two kinds of row belong to that Session:
+ *   - comments it AUTHORED (`@<resumeId>`)
+ *   - comments the owner sent TO it, identified by `delivery.targetResumeId`
+ *
+ * The second rule is deliberately narrow. It removes the user's own messages
+ * only when a delivery record proves they were addressed to this Session; a
+ * comment on another Session, or one with no routing record, is never touched.
+ */
+export async function removeSessionComments(
+  wsDir: string,
+  id: string,
+  resumeId: string,
+): Promise<{ ok: true; removed: number } | { ok: false; error: string }> {
+  const author = sessionSignature(resumeId)
+  return mutateIssueComments(wsDir, id, async () => {
+    const existing = await readIssueComments(wsDir, id)
+    if (!existing.ok) return { ok: false as const, error: existing.error }
+    const kept = existing.comments.filter((comment) =>
+      comment.author.trim() !== author
+      && comment.delivery?.targetResumeId !== resumeId,
+    )
+    const removed = existing.comments.length - kept.length
+    if (removed === 0) return { ok: true as const, removed: 0 }
+    await writeIssueComments(wsDir, id, kept)
+    return { ok: true as const, removed }
   })
 }

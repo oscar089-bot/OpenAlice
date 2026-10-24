@@ -2020,9 +2020,11 @@ export function createWorkspaceRoutes(
     let credentialSlug: string | undefined;
     let model: string | undefined;
     let reasoningEffort: ModelReasoningEffort | undefined;
+    let adoptOrphanedWatches = false;
     try {
       const body = await safeJson(c);
       const fields = body && typeof body === 'object' ? (body as Record<string, unknown>) : {};
+      if (fields['adoptOrphanedWatches'] === true) adoptOrphanedWatches = true;
       const rawResumeId = fields['resumeId'];
       if (typeof rawResumeId === 'string' && validId(rawResumeId)) resumeId = rawResumeId;
       const rawAgent = fields['agent'];
@@ -2058,6 +2060,13 @@ export function createWorkspaceRoutes(
         : {}),
     });
     if (!result.ok) return c.json(result.body, result.status as 400 | 500);
+    // Only a FRESH Session can adopt: a resume already has its own watcher
+    // history, and silently moving another Session's watchers onto it would be
+    // a surprise edit the operator did not ask for.
+    if (adoptOrphanedWatches && resumeId === undefined) {
+      await svc.adoptOrphanedWatches({ wsId: meta.id, resumeId: result.session.resumeId })
+        .catch((err) => launcherLogger.warn('watch.adopt_route_failed', { wsId: meta.id, err }));
+    }
     return c.json(result.session, 201);
   });
 
@@ -3081,6 +3090,39 @@ export function createWorkspaceRoutes(
       });
     }
     return c.json({ ok: true, wasRunning });
+  });
+
+  // Delete by product Session handle. Issue surfaces and other resumeId
+  // consumers never receive launcher record ids, so this is the handle-only
+  // sibling of the record-id route above. It deliberately does NOT stop a
+  // running turn: a busy Session is refused so a delete cannot kill the
+  // conversation that is currently replying.
+  app.delete('/:id/resumes/:resumeId', async (c) => {
+    const id = c.req.param('id');
+    const resumeId = c.req.param('resumeId');
+    if (!validId(id) || !validId(resumeId)) return c.json({ error: 'not_found' }, 404);
+    if (!svc.registry.get(id)) return c.json({ error: 'workspace_not_found' }, 404);
+    try {
+      const identity = await svc.deleteSessionPresence({ wsId: id, resumeId });
+      launcherLogger.info('workspace.session_deleted', { id, resumeId });
+      return c.json({
+        ok: true,
+        resumeId: identity.resumeId,
+        presence: sessionPresence(identity),
+      });
+    } catch (err) {
+      if (err instanceof ResumePresenceError) {
+        const error = err.code === 'not_found' ? 'resume_not_found'
+          : err.code === 'retired' ? 'resume_retired'
+            : err.code === 'wrong_workspace' ? 'resume_wrong_workspace'
+              : 'invalid_presence_transition';
+        return c.json({ error, message: err.message }, err.code === 'not_found' ? 404 : 409);
+      }
+      if (err instanceof HeadlessResumeError) {
+        return c.json({ error: `resume_${err.code}`, message: err.message }, 409);
+      }
+      throw err;
+    }
   });
 
   // ── deprecated native-project compatibility export ─────────────────────

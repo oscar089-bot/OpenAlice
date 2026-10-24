@@ -1,4 +1,9 @@
-import type { ConnectorModelRequest, ConnectorModelPanel } from '@traderalice/connector-protocol'
+import type {
+  ConnectorModelPanel,
+  ConnectorModelRequest,
+  ConnectorSessionPanel,
+  ConnectorSessionRequest,
+} from '@traderalice/connector-protocol'
 import { parseMarketReference } from '@traderalice/connector-protocol'
 import { parseReplyDirectives, replyMedia } from './reply-directives.js'
 import type { ConnectorAttachment } from '@traderalice/connector-protocol'
@@ -61,6 +66,8 @@ import {
 export interface DeliveryManagerOptions {
   renderMarket?(reference: string): Promise<ConnectorAttachment>
   sessionModel?(connectorId: string, request: ConnectorModelRequest): Promise<ConnectorModelPanel>
+  /** Owner-facing Session roster/create/switch panel for one phone desk. */
+  sessionDesk?(connectorId: string, request: ConnectorSessionRequest): Promise<ConnectorSessionPanel>
   /** Owner-facing stop for one connector's in-flight phone-desk turn. */
   stopDeskRun?(connectorId: string): Promise<{ stopped: boolean; taskId?: string }>
   newDeskSession?(connectorId: string): Promise<{ started: boolean; previousResumeId?: string }>
@@ -923,6 +930,9 @@ export class DeliveryManager {
       getServiceStatus: () => this.health().status,
       sendTest: (connectorId) => this.sendTest(connectorId),
       ...(this.options.stopDeskRun ? { stopDeskRun: () => this.options.stopDeskRun!(id) } : {}),
+      ...(this.options.sessionDesk
+        ? { sessionDesk: (request: ConnectorSessionRequest) => this.options.sessionDesk!(id, request) }
+        : {}),
       ...(this.options.newDeskSession
         ? {
             newDeskSession: async () => {

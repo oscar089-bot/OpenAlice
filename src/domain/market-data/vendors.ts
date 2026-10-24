@@ -18,7 +18,7 @@
  */
 
 import type { QueryExecutor } from '@traderalice/opentypebb'
-import { readMarketDataConfig, updateExtraVendors } from '@/core/config.js'
+import { readMarketDataConfig, readTvFeedConfig, updateExtraVendors } from '@/core/config.js'
 
 export interface MarketVendorInfo {
   /** Vendor id used everywhere (search sourceId, setMarketVendor arg). */
@@ -36,6 +36,43 @@ export interface MarketVendorInfo {
   /** How to drive it (symbol convention, search-language quirks). */
   howToUse: string
   website?: string
+}
+
+/**
+ * The TradingView live feed, described in the same vocabulary as a vendor.
+ *
+ * It is NOT an embedded OpenTypeBB provider and cannot be toggled through
+ * `setMarketVendor`, so it is reported separately — but it MUST be reported,
+ * or an agent that inspects its data sources concludes no live feed exists and
+ * tells the user its watchers are on a delayed vendor when they are not.
+ */
+export interface LiveFeedInfo {
+  /** Not a search vendor id; this is the live-price overlay. */
+  kind: 'live-price-overlay'
+  enabled: boolean
+  /** Asset classes it serves. Outside these, the delayed vendor still applies. */
+  assetClasses: string[]
+  /** How a watcher opts in — no symbol change is needed. */
+  howToUse: string
+  /** Honest statement of what happens when it is off or disconnected. */
+  fallback: string
+}
+
+/** Describe the TradingView live feed for the discovery surface. */
+export async function describeLiveFeed(): Promise<LiveFeedInfo> {
+  const tv = await readTvFeedConfig()
+  return {
+    kind: 'live-price-overlay',
+    enabled: tv.enabled,
+    assetClasses: [...tv.assetClasses],
+    howToUse:
+      'Watchers on these asset classes are priced from real-time push data automatically. ' +
+      'Do NOT change the pair syntax or ask for a special symbol; write the normal ' +
+      'exchange-native pair (crypto `BTC-USDT`) or forex form (`EURUSD=X`).',
+    fallback:
+      'When disabled, disconnected, or stale, watchers transparently fall back to the delayed ' +
+      'federated vendor feed. Equity, commodity, and index watchers always use that feed.',
+  }
 }
 
 /** Every provider that has opted into the vendor picker (declared `vendorMeta`),

@@ -355,10 +355,12 @@ for the next phase; otherwise mark it done.
   as a literal ticker and fails with *"No data found, symbol may be delisted"*.
   A `yfinance|...` barId is now **rejected at authoring time** with the symbol to
   write instead, so the mistake cannot be persisted silently.
-  Crypto uses **exchange-native pairs** (`BTC-USDT`, `SOL-USDT`) and is priced
-  from the keyless OKX exchange feed with real exchange volume; forex uses the
-  Yahoo spot form (`EURUSD=X`). Do NOT guess the exact pair — confirm it with
-  `alice market search-bars` and drop the `source|` prefix. Full pair table:
+  Crypto uses **exchange-native pairs** (`BTC-USDT`, `SOL-USDT`) and forex uses
+  the Yahoo spot form (`EURUSD=X`). Both are priced live when the TradingView
+  feed is running (see *Live pricing* below), and fall back to the delayed
+  vendor feed otherwise, so the same syntax is correct either way. Do NOT guess
+  the exact pair — confirm it with `alice market search-bars` and drop the
+  `source|` prefix. Full pair table:
   [watcher reference](references/watch-reference.md#pair-rules-the-guard).
 - `assignee: "@resumeId"` is what makes the wake return to **the same coworker**
   who wrote the analysis. Without it a scheduled-style recruit runs instead.
