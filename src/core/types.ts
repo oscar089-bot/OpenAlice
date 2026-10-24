@@ -12,6 +12,7 @@ import type { ToolCenter } from './tool-center.js'
 import type { WorkspaceToolCenter } from './workspace-tool-center.js'
 import type { IInboxStore } from './inbox-store.js'
 import type { IEntityStore } from './entity-store.js'
+import type { IMemoryStore } from './memory-store.js'
 
 export type { Config, WebChannel }
 
@@ -37,6 +38,9 @@ export interface EngineContext {
    *  workspace agents via the entity_upsert MCP tool; read by the Tracked
    *  tab. Notes point at entities with `[[name]]` links. */
   entityStore: IEntityStore
+  /** Durable user-global agent memory. Its index is injected into every
+   *  Workspace session's system prompt; writes go through memory_* tools. */
+  memoryStore: IMemoryStore
   toolCallLog: ToolCallLog
   toolCenter: ToolCenter
   workspaceToolCenter: WorkspaceToolCenter

@@ -8,9 +8,12 @@
  * wait for the final reply.
  */
 import { createHash, randomUUID } from 'node:crypto'
+import { mkdir, writeFile } from 'node:fs/promises'
+import { dirname, join, sep } from 'node:path'
 import {
   builtinConnectorHasCapability,
   ConnectorClient,
+  type InboundAttachment,
   type InboundOwnerMessage,
 } from '@traderalice/connector-protocol'
 
@@ -87,6 +90,53 @@ function quoteInboundMessage(text: string): string {
   return text.split('\n').map((line) => (line.length > 0 ? `> ${line}` : '>')).join('\n')
 }
 
+/** Extension allow-list. The sender's filename is never trusted for the path —
+ *  only the declared media type, so an inbound name cannot traverse or pick an
+ *  executable suffix. */
+const INBOUND_MEDIA_EXTENSION: Record<string, string> = {
+  'image/jpeg': 'jpg',
+  'image/png': 'png',
+  'image/webp': 'webp',
+  'image/gif': 'gif',
+}
+
+/**
+ * Write the owner's inbound images into the Workspace and return the markdown
+ * references that let the coding agent open them.
+ *
+ * The desk turn is a headless CLI run whose cwd IS the Workspace, so a relative
+ * path in the Issue comment is a path the model can read with its native file
+ * tool. Content-addressed names make a re-delivery idempotent and prevent two
+ * different photos from colliding.
+ *
+ * Several images in one message are all kept, in the order Telegram sent them.
+ */
+async function persistInboundAttachments(
+  workspaceDir: string,
+  attachments: readonly InboundAttachment[] | undefined,
+): Promise<string[]> {
+  if (!attachments?.length) return []
+  const blocks: string[] = []
+  for (const attachment of attachments) {
+    const extension = INBOUND_MEDIA_EXTENSION[attachment.mediaType]
+    if (!extension) continue
+    try {
+      const bytes = Buffer.from(attachment.contentBase64, 'base64')
+      if (bytes.byteLength === 0) continue
+      const digest = createHash('sha256').update(bytes).digest('hex').slice(0, 32)
+      const relative = join('.alice', 'inbox-media', `${digest}.${extension}`)
+      const absolute = join(workspaceDir, relative)
+      await mkdir(dirname(absolute), { recursive: true })
+      await writeFile(absolute, bytes)
+      blocks.push(`![image](${relative.split(sep).join('/')})`)
+    } catch {
+      // A single unreadable image must not lose the owner's text or the other
+      // images in the same message.
+    }
+  }
+  return blocks
+}
+
 export async function ingestTelegramOwnerMessage(
   host: ConnectorDeskChatHost,
   message: InboundOwnerMessage,
@@ -116,13 +166,19 @@ export async function ingestConnectorOwnerMessages(
   if (!builtinConnectorHasCapability(connectorId, 'desk')) {
     return { ok: false, reason: 'unsupported_connector' }
   }
-  const texts = messages.map((message) => message.text)
-  const markdown = formatTelegramInboundStack(texts)
-  if (!markdown) return { ok: false, reason: 'empty' }
   const desk = await findLiveDesk(host, connectorId)
   if (!desk) return { ok: false, reason: 'desk_disabled' }
   const workspace = host.getWorkspace(desk.wsId)
   if (!workspace) return { ok: false, reason: 'workspace_missing' }
+
+  const texts = messages.map((message) => message.text ?? '')
+  const attachmentBlocks = await Promise.all(
+    messages.map((message) => persistInboundAttachments(workspace.dir, message.attachments)),
+  )
+  const markdown = formatTelegramInboundStack(
+    texts.map((text, index) => [text, ...(attachmentBlocks[index] ?? [])].filter(Boolean).join('\n')),
+  )
+  if (!markdown) return { ok: false, reason: 'empty' }
 
   const stableEvents = messages.map((message) => message.eventId).filter((id): id is string => Boolean(id))
   const commentId = stableEvents.length === messages.length

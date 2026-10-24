@@ -908,6 +908,7 @@ export const zhHant: Resources = {
       harness: 'Harness',
       connectors: '連接器',
       mcpServer: 'MCP 伺服器',
+      memory: '記憶',
       marketData: '市場資料',
       newsSources: '新聞來源',
       beta: '測試版',

@@ -26,6 +26,7 @@ import { workspaceSessionsFactory } from '../tool/workspace-sessions.js'
 import { workspaceListFactory } from '../tool/workspace-list.js'
 import { workspaceTemplateUpgradeFactory, aliceHarnessUpgradeFactory } from '../tool/workspace-template-upgrade.js'
 import { entityUpsertFactory } from '../tool/entity-upsert.js'
+import { memoryToolFactories } from '../tool/memory.js'
 import { entitySearchFactory } from '../tool/entity-search.js'
 import { issueToolFactories } from '../tool/issue-tools.js'
 import { sessionSignatureFactory } from '../tool/session-signature.js'
@@ -124,6 +125,7 @@ describe('CLI_EXPORTS — workspace export (scoped collaboration tools)', () => 
   wtc.register(provenanceShowFactory)
   for (const f of conversationToolFactories) wtc.register(f)
   for (const f of artifactConversationToolFactories) wtc.register(f)
+  for (const f of memoryToolFactories) wtc.register(f)
   const built = wtc.build({
     workspaceId: 'ws-test',
     workspaceLabel: 'test',

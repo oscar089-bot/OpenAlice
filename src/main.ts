@@ -71,6 +71,8 @@ import { workspaceSessionsFactory } from './tool/workspace-sessions.js'
 import { workspaceListFactory } from './tool/workspace-list.js'
 import { workspaceTemplateUpgradeFactory, aliceHarnessUpgradeFactory } from './tool/workspace-template-upgrade.js'
 import { createEntityStore } from './core/entity-store.js'
+import { createMemoryStore } from './core/memory-store.js'
+import { memoryToolFactories } from './tool/memory.js'
 import { entityUpsertFactory } from './tool/entity-upsert.js'
 import { entitySearchFactory } from './tool/entity-search.js'
 import { issueToolFactories } from './tool/issue-tools.js'
@@ -125,6 +127,7 @@ async function main() {
   workspaceToolCenter.register(provenanceShowFactory)
   for (const f of conversationToolFactories) workspaceToolCenter.register(f)
   for (const f of artifactConversationToolFactories) workspaceToolCenter.register(f)
+  for (const f of memoryToolFactories) workspaceToolCenter.register(f)
 
   // ==================== UTA SDK (HTTP boundary) ====================
   //
@@ -315,6 +318,12 @@ async function main() {
 
   const entityStore = createEntityStore()
 
+  // Durable user-global agent memory. Created here (not in WebPlugin) because
+  // the workspace tool factories need it and MCP may start before the web
+  // plugin. `data/memory` survives upgrades; the index is injected into each
+  // session's system prompt at spawn.
+  const memoryStore = createMemoryStore()
+
   // ==================== Cron Listener ====================
 
   // Cross-plugin ref so the cron listener (and McpPlugin) can reach the
@@ -400,6 +409,7 @@ async function main() {
       workspaceToolCenter,
       inboxStore,
       entityStore,
+      memoryStore,
       () => workspaceServiceRef.current,
     ))
   } else if (!localCliOnWeb && config.mcp.port) {
@@ -408,6 +418,7 @@ async function main() {
       workspaceToolCenter,
       inboxStore,
       entityStore,
+      memoryStore,
       getWorkspaceService: () => workspaceServiceRef.current,
     }))
   }
@@ -446,7 +457,7 @@ async function main() {
   // ==================== Engine Context ====================
 
   const ctx: EngineContext = {
-    config, inboxStore, entityStore, toolCallLog, toolCenter,
+    config, inboxStore, entityStore, memoryStore, toolCallLog, toolCenter,
     workspaceToolCenter,
     bbEngine: getSDKExecutor(),
     marketSearch,

@@ -28,6 +28,7 @@ import { AgentRuntimesSettingsPage } from '../pages/AgentRuntimesSettingsPage'
 import { AIProviderPage } from '../pages/AIProviderPage'
 import { TradingPage } from '../pages/TradingPage'
 import { MCPPage } from '../pages/MCPPage'
+import { MemorySettingsPage } from '../pages/MemorySettingsPage'
 import { ConnectorsPage } from '../pages/ConnectorsPage'
 import { ConnectorStatusPage } from '../pages/ConnectorStatusPage'
 import { MarketDataPage } from '../pages/MarketDataPage'
@@ -280,6 +281,7 @@ const settingsCategoryTitle: Record<
   visibility: 'Visibility',
   connectors: 'Connectors',
   mcp: 'MCP Server',
+  memory: 'Memory',
   'market-data': 'Market Data',
   'news-collector': 'News Sources',
   'workspace-injection': 'Workspace injection',
@@ -302,6 +304,7 @@ function SettingsRouter({ spec }: ViewProps<'settings'>) {
     case 'visibility': return <SessionVisibilitySettingsPage />
     case 'connectors': return <ConnectorsPage />
     case 'mcp': return <MCPPage />
+    case 'memory': return <MemorySettingsPage />
     case 'market-data': return <MarketDataPage />
     case 'news-collector': return <NewsCollectorPage />
     case 'workspace-injection': return <WorkspaceInjectionPage />

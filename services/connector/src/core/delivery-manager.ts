@@ -952,6 +952,7 @@ export class DeliveryManager {
           text: input.text,
           ...(input.chatId ? { chatId: input.chatId } : {}),
           ...(input.eventId ? { eventId: input.eventId } : {}),
+          ...(input.attachments?.length ? { attachments: input.attachments } : {}),
         })
       },
       enqueueArtifactRequest: (input) => this.enqueueArtifactRequest(id, input),

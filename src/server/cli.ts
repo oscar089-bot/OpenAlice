@@ -40,6 +40,7 @@ import {
 import type { IInboxStore, InboxOrigin } from '../core/inbox-store.js'
 import { sessionCoworkerLabel } from '../workspaces/session-registry.js'
 import type { IEntityStore } from '../core/entity-store.js'
+import type { IMemoryStore } from '../core/memory-store.js'
 import { sessionOriginFromInboxOrigin } from '../core/provenance-store.js'
 import type { WorkspaceService } from '../workspaces/service.js'
 import { logger as launcherLogger } from '../workspaces/logger.js'
@@ -61,6 +62,8 @@ export interface CliGatewayDeps {
   inboxStore: IInboxStore
   /** Built per-request for the `workspace` (scoped) export's tools. */
   entityStore: IEntityStore
+  /** Durable user-global agent memory, exposed as memory_* / skill_* tools. */
+  memoryStore?: IMemoryStore
   /** Lazy — WorkspaceService is created after McpPlugin starts. */
   getWorkspaceService: () => WorkspaceService | null
 }
@@ -69,7 +72,7 @@ type WsMeta = { id: string; tag: string; dir?: string }
 
 /** Mount /cli/:wsId/:export/* onto an existing Hono app (the MCP server's app). */
 export function registerCliRoutes(app: Hono, deps: CliGatewayDeps, manifestOnly = false): void {
-  const { toolCenter, workspaceToolCenter, inboxStore, entityStore, getWorkspaceService } = deps
+  const { toolCenter, workspaceToolCenter, inboxStore, entityStore, memoryStore, getWorkspaceService } = deps
   if (!manifestOnly) {
     registerConnectorModelRoutes(app, getWorkspaceService)
     registerConnectorStopRoutes(app, getWorkspaceService)
@@ -118,6 +121,7 @@ export function registerCliRoutes(app: Hono, deps: CliGatewayDeps, manifestOnly 
         workspaceLabel: ws.tag,
         inboxStore,
         entityStore,
+        ...(memoryStore ? { memoryStore } : {}),
         ...(svc ? { provenanceStore: svc.provenanceStore } : {}),
         ...(svc ? { conversation: createWorkspaceConversationControl(svc) } : {}),
         ...(svc ? { templateUpgrades: svc.templateUpgrades, aliceHarnessUpgrades: svc.aliceHarnessUpgrades } : {}),

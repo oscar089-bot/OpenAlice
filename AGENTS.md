@@ -19,7 +19,7 @@ pnpm install              # full local install, including Electron
 pnpm dev                  # Guardian -> UTA + Alice + Vite
 pnpm dev --takeover       # replace the recorded local Guardian owner tree
 pnpm build                # packages + UI + UTA + Alice
-pnpm test:changed         # hermetic changed-file closure against origin/dev
+pnpm test:changed         # hermetic changed-file closure against upstream/dev
 pnpm test:owner:ui        # complete hermetic UI owner suite
 pnpm test:integration     # deterministic local product integration
 pnpm test                 # complete hermetic monorepo Vitest suite
@@ -28,17 +28,19 @@ pnpm test:select --help   # owners, lanes, areas, packages, and side effects
 
 Before changing files:
 
-1. Run `git fetch origin`, `git status -sb`, and inspect the current diff.
+1. Run `git status -sb` and inspect the current diff.
 2. Preserve unrelated user changes. Do not reset, overwrite, stash, or commit
    them merely to obtain a clean tree.
-3. Routine work starts from current `dev` on a focused feature branch. If the
-   checkout is on `master`, a merged branch, or a surprising historical branch,
-   establish the intended base before editing.
+3. **This checkout is a personal fork. `master` is the working lane.** Commit
+   directly to local `master` and push to `origin` (the fork). Do not invent a
+   `dev` lane or an intermediate feature branch unless the change is genuinely
+   speculative. `upstream` (TraderAlice/OpenAlice) is read-only reference: fetch
+   it to compare, cherry-pick, or run `test:changed`, but never push to it.
 4. Start from the real surface: reproduce UI/runtime behavior, inspect current
    code, and read the applicable owner guide before designing.
 5. Before adding a migration, compatibility parser, or dual-read path, establish
-   whether the persisted shape shipped. Replace unreleased `dev`-only shapes
-   directly; do not turn them into permanent upgrade boundaries.
+   whether the persisted shape shipped. Replace unreleased shapes directly; do
+   not turn them into permanent upgrade boundaries.
 
 ## UI Design Workflow
 
@@ -81,35 +83,27 @@ See [[docs/project-structure.md]] for current ownership and entry points.
 
 ## Delivery Authority
 
-- `dev` is the routine integration lane and active preview channel. Routine PRs
-  target `dev`.
-- `master` is the release-source/user-facing lane. Promotion, beta/stable tags,
-  version synchronization, feeds, and publication follow the manual contract in
-  [[docs/development-workflow.md]]; merging to `master` does not itself publish.
-- Do not commit directly to `master`. Avoid direct commits to `dev` unless the
-  maintainer explicitly requests integration work. Never force-push or delete
-  either branch.
-- Prefer merge commits for ordinary PRs. Preserve a feature branch while its
-  work is unmerged and delete it only after GitHub records a successful merge.
+This is a **fork**, not the upstream release train. The delivery model is
+correspondingly simple:
 
-Choose delivery authority before implementation:
+- **`master` is the working lane.** Develop, commit, and push directly to
+  `origin/master`. There is no `dev` branch here and no PR ceremony for routine
+  work.
+- **`upstream` is read-only.** Fetch it to compare against the release train,
+  cherry-pick an upstream fix, or give `pnpm test:changed` a baseline
+  (`upstream/dev`). Never push to `upstream` and never force-push `master`.
+- **Commit granularity** follows the change, not a review process: one coherent
+  commit per feature or fix, with the reasoning in the body when the diff alone
+  does not explain it.
+- **Releases are upstream's job.** Tags, version synchronization, feeds, and
+  publication in [[docs/development-workflow.md]] describe the upstream
+  contract. Do not run them here unless explicitly asked.
+- If a change is genuinely speculative — it might be reverted wholesale — use a
+  scratch branch off `master` and merge it back with `--no-ff`. Otherwise stay
+  on `master`.
 
-| Mode | Trigger | Delivery |
-|---|---|---|
-| Serial / interactive | Default when the user is actively steering concrete work | After proportional local verification, open and merge a PR to `dev` without treating pending remote CI as a synchronous lock |
-| Autonomous / topic | Explicit `/goal` or autonomous contribution request | Keep one coherent Draft PR open for later acceptance; CI never grants merge authority |
-
-An explicit feature-branch iteration request overrides PR timing in either
-mode: keep all related increments on one owned branch and do not open or merge
-its PR until the maintainer accepts it. One integrator owns that branch;
-parallel workers hand off commits rather than racing to push or creating one PR
-per finding.
-
-Pending CI alone does not block serial progress, but a known product or contract
-failure must be understood and repaired before adding scope. Beta promotion may
-use recorded local acceptance plus the lightweight master PR gates. Stable
-release, explicit review pauses, and untrusted contributions retain their full
-synchronous gates.
+Pending CI never blocks local progress. A known product or contract failure does:
+understand and repair it before adding scope.
 
 ## Verification Ladder
 

@@ -12,6 +12,7 @@ import {
 } from '../core/workspace-tool-center.js'
 import type { IInboxStore } from '../core/inbox-store.js'
 import type { IEntityStore } from '../core/entity-store.js'
+import type { IMemoryStore } from '../core/memory-store.js'
 import type { WorkspaceService } from '../workspaces/service.js'
 import type { InboxOrigin } from '../core/inbox-store.js'
 import { extractMcpShape, wrapToolExecute } from '../core/mcp-export.js'
@@ -65,6 +66,8 @@ export class McpPlugin implements Plugin {
     private workspaceToolCenter: WorkspaceToolCenter,
     private inboxStore: IInboxStore,
     private entityStore: IEntityStore,
+    /** Durable user-global agent memory, injected into workspace tool builds. */
+    private memoryStore: IMemoryStore | undefined,
     /** Lazy because WorkspaceService is created later (deferred during web
      *  plugin start); McpPlugin starts earlier. Resolved at request time. */
     private getWorkspaceService: () => WorkspaceService | null,
@@ -75,6 +78,7 @@ export class McpPlugin implements Plugin {
     const workspaceToolCenter = this.workspaceToolCenter
     const inboxStore = this.inboxStore
     const entityStore = this.entityStore
+    const memoryStore = this.memoryStore
     const getWorkspaceService = this.getWorkspaceService
 
     /** Build a per-request McpServer with the global ToolCenter catalog. */
@@ -104,6 +108,7 @@ export class McpPlugin implements Plugin {
         workspaceLabel: wsLabel,
         inboxStore,
         entityStore,
+        ...(memoryStore ? { memoryStore } : {}),
         ...(svc ? { provenanceStore: svc.provenanceStore } : {}),
         ...(svc ? { conversation: createWorkspaceConversationControl(svc) } : {}),
         ...(svc ? { templateUpgrades: svc.templateUpgrades } : {}),
@@ -249,6 +254,7 @@ export class McpPlugin implements Plugin {
       workspaceToolCenter,
       inboxStore,
       entityStore,
+      ...(memoryStore ? { memoryStore } : {}),
       getWorkspaceService,
     })
 

@@ -29,6 +29,7 @@ import { createBarsRoutes } from './routes/bars.js'
 import { createReferenceRoutes } from './routes/reference.js'
 import { createInboxRoutes } from './routes/inbox.js'
 import { createEntityRoutes } from './routes/entities.js'
+import { createMemoryRoutes } from './routes/memory.js'
 import { createWikilinkRoutes } from './routes/wikilink.js'
 import { createVersionRoutes } from './routes/version.js'
 import { createAliceProjectRoutes } from './routes/alice-project.js'
@@ -307,6 +308,7 @@ export class WebPlugin implements Plugin {
         ? { watchLoopIntervalMs: this.config.watchLoopIntervalMs }
         : {}),
       inboxStore: ctx.inboxStore,
+      ...(ctx.memoryStore ? { memoryStore: ctx.memoryStore } : {}),
     })
     this.workspaceAutoUpdates = new WorkspaceAutoUpdates(this.workspaceService)
     const defaultWorkspaceService = this.workspaceService
@@ -349,6 +351,10 @@ export class WebPlugin implements Plugin {
       '/api/entities',
       createEntityRoutes({ entityStore: ctx.entityStore, registry: this.workspaceService.registry }),
     )
+    // Durable agent memory — the Settings → Memory surface. The agent writes
+    // through memory_* MCP tools; this route is the human's list/edit/rule
+    // surface, so it never gains an approve/deny step.
+    app.route('/api/memory', createMemoryRoutes({ memoryStore: ctx.memoryStore }))
     // Cross-namespace [[name]] resolver — entities (global store) + issues (per-
     // workspace scan) in one lookup so the UI can navigate or disambiguate a
     // clicked wikilink. Same dep shape rationale as /api/entities above.

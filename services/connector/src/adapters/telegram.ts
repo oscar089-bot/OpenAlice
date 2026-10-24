@@ -17,9 +17,11 @@ import type {
 } from '@traderalice/connector-protocol'
 import {
   isInboxPushEnabled,
+  MAX_INBOUND_ATTACHMENT_BYTES,
   renderTurnActivity,
   renderTurnActivityRich,
   TELEGRAM_CONNECTOR_DEFINITION,
+  type InboundAttachment,
 } from '@traderalice/connector-protocol'
 import { createInboxStore, type IInboxStore } from '@/core/inbox-store.js'
 import type {
@@ -642,6 +644,9 @@ export class TelegramConnectorAdapter implements ConnectorAdapter {
   private async disconnectSession(): Promise<void> {
     this.sessionReady = false
     this.stopAllDrafts()
+    // Drop half-collected albums so a timer cannot forward into a dead bot.
+    for (const buffer of this.albumBuffers.values()) clearTimeout(buffer.timer)
+    this.albumBuffers.clear()
     const bot = this.bot
     this.bot = undefined
     await Promise.resolve(bot?.stop()).catch(() => undefined)
@@ -749,6 +754,196 @@ export class TelegramConnectorAdapter implements ConnectorAdapter {
           .catch(() => undefined)
       }
     })
+
+    // Photos and image documents. Before this handler existed, `message:text`
+    // was the ONLY inbound subscription, so an image the owner sent never
+    // reached Alice at all — it was not a multimodal failure, it was a missing
+    // route. A caption rides along as the question.
+    //
+    // Albums: Telegram delivers one album as N separate messages that share a
+    // `media_group_id`, with the caption on only one of them. Forwarding each
+    // immediately would produce N turns and lose the caption on all but one,
+    // so they are buffered for a short window and forwarded as a single turn.
+    bot.on(['message:photo', 'message:document'], async (ctx) => {
+      if (ctx.chat.type !== 'private' || !ctx.from) return
+      if (!this.isOwner(String(ctx.from.id))) return
+      const message = ctx.message
+      const caption = (message.caption ?? '').trim()
+      if (caption.startsWith('/')) return
+
+      const groupId = message.media_group_id
+      if (groupId) {
+        this.bufferAlbumItem(groupId, { messageId: message.message_id, caption }, ctx, context)
+        return
+      }
+
+      await this.forwardInboundImage(ctx, context, {
+        text: caption,
+        eventId: String(message.message_id),
+      })
+    })
+
+    // A text message the owner sends alongside a photo album arrives as its own
+    // `message:text` and is forwarded by the handler above, so nothing is lost.
+    // Albums only need the media buffer cleaned up on disconnect.
+  }
+
+  /** One album awaiting its remaining messages. Keyed by `media_group_id`. */
+  private readonly albumBuffers = new Map<
+    string,
+    {
+      attachments: import('@traderalice/connector-protocol').InboundAttachment[]
+      text: string
+      eventId: string
+      timer: ReturnType<typeof setTimeout>
+      /** Downloads still in flight for this album. The settle timer waits for
+       *  them, otherwise a slow Telegram fetch would forward an empty album. */
+      pending: Promise<void>[]
+    }
+  >()
+
+  /** Wait this long for the rest of an album before forwarding what arrived.
+   *  Telegram sends album items within milliseconds; this only guards against
+   *  a dropped upload leaving the buffer stuck forever. */
+  private static readonly ALBUM_SETTLE_MS = 700
+
+  private bufferAlbumItem(
+    groupId: string,
+    item: { messageId: number; caption: string },
+    ctx: Context,
+    context: ConnectorAdapterContext,
+  ): void {
+    const existing = this.albumBuffers.get(groupId)
+    if (existing?.timer) clearTimeout(existing.timer)
+
+    const buffer = existing ?? {
+      attachments: [],
+      text: '',
+      eventId: String(item.messageId),
+      timer: undefined as never,
+      pending: [],
+    }
+    if (item.caption) buffer.text = item.caption
+
+    const download = this.downloadInboundAttachments(ctx)
+      .then((attachments) => {
+        buffer.attachments.push(...attachments)
+      })
+      .catch((error) => {
+        this.tracker.degraded(error)
+      })
+    buffer.pending.push(download)
+
+    buffer.timer = setTimeout(() => {
+      void (async () => {
+        // Wait for every download in this album before forwarding, so the
+        // model receives all images rather than whichever finished first.
+        await Promise.all(buffer.pending)
+        this.albumBuffers.delete(groupId)
+        await this.forwardInboundImage(ctx, context, {
+          text: buffer.text,
+          eventId: buffer.eventId,
+          prefetched: buffer.attachments,
+        })
+      })()
+    }, TelegramConnectorAdapter.ALBUM_SETTLE_MS)
+    buffer.timer.unref?.()
+    this.albumBuffers.set(groupId, buffer)
+  }
+
+  /** Download, forward, and report one inbound image turn. Shared by the
+   *  single-image path and the album buffer so both behave identically. */
+  private async forwardInboundImage(
+    ctx: Context,
+    context: ConnectorAdapterContext,
+    input: {
+      text: string
+      eventId: string
+      prefetched?: import('@traderalice/connector-protocol').InboundAttachment[]
+    },
+  ): Promise<void> {
+    const attachments = input.prefetched ?? await this.downloadInboundAttachments(ctx)
+    if (attachments.length === 0) {
+      await ctx.reply('I could not read that image. Try sending it as a photo or a PNG/JPEG file.')
+        .catch(() => undefined)
+      return
+    }
+    try {
+      await context.forwardOwnerText({
+        text: input.text,
+        userId: String(ctx.from?.id ?? ''),
+        chatId: String(ctx.chat?.id ?? ''),
+        eventId: input.eventId,
+        attachments,
+      })
+    } catch (error) {
+      this.tracker.degraded(error)
+      await ctx.reply('OpenAlice could not accept this image. Check Connector Settings and logs.')
+        .catch(() => undefined)
+    }
+  }
+
+  /** Telegram's supported inbound image types. Anything else is declined
+   *  rather than silently dropped, so the owner gets a reply either way. */
+  private static readonly INBOUND_IMAGE_TYPES: Record<string, string> = {
+    'image/jpeg': 'jpg',
+    'image/png': 'png',
+    'image/webp': 'webp',
+    'image/gif': 'gif',
+  }
+
+  /** Download one message's image into base64 for the Connector → Alice hop.
+   *
+   *  Telegram caps Bot API downloads at 20 MB; we cap at
+   *  MAX_INBOUND_ATTACHMENT_BYTES (5 MB) because the base64 payload crosses a
+   *  loopback HTTP body and lands in a markdown comment. Refusing is better
+   *  than truncating an image the model would then misread. */
+  private async downloadInboundAttachments(
+    ctx: Context,
+  ): Promise<InboundAttachment[]> {
+    const message = ctx.message
+    if (!message || !this.bot) return []
+
+    // `photo` is an array of resized variants; the last entry is the largest.
+    const candidate = message.photo?.length
+      ? message.photo[message.photo.length - 1]
+      : message.document?.mime_type?.startsWith('image/')
+        ? message.document
+        : undefined
+    if (!candidate) return []
+
+    const mimeType = message.document?.mime_type ?? 'image/jpeg'
+    const extension = TelegramConnectorAdapter.INBOUND_IMAGE_TYPES[mimeType]
+    if (!extension) return []
+
+    try {
+      const file = await this.bot.api.getFile(candidate.file_id)
+      if (!file.file_path) return []
+      if (typeof candidate.file_size === 'number' && candidate.file_size > MAX_INBOUND_ATTACHMENT_BYTES) {
+        return []
+      }
+
+      const token = this.bot.token
+      const url = new URL(`https://api.telegram.org/file/bot${token}/${file.file_path}`)
+      // Plain fetch: a configured proxy installs a process-wide undici
+      // dispatcher (see core/proxy.ts), so no per-request agent is needed
+      // here and passing one would fight the RequestInit type.
+      const response = await fetch(url)
+      if (!response.ok) return []
+      const bytes = Buffer.from(await response.arrayBuffer())
+      if (bytes.byteLength === 0 || bytes.byteLength > MAX_INBOUND_ATTACHMENT_BYTES) return []
+
+      const unique = candidate.file_unique_id ?? String(candidate.file_id)
+      return [{
+        filename: `${unique}.${extension}`,
+        mediaType: mimeType,
+        sizeBytes: bytes.byteLength,
+        contentBase64: bytes.toString('base64'),
+      }]
+    } catch (error) {
+      this.tracker.degraded(error)
+      return []
+    }
   }
 
   private async awaitPollingOrAbort(polling: Promise<void>): Promise<void> {

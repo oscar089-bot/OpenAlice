@@ -48,7 +48,15 @@ export interface ConnectorAdapterContext {
   stopDeskRun?(): Promise<{ stopped: boolean; taskId?: string }>
   /** Reset this adapter's phone desk so the next message recruits a fresh Session. */
   newDeskSession?(): Promise<{ started: boolean; reason?: 'running' | 'unavailable' }>
-  forwardOwnerText(input: { text: string; userId: string; chatId?: string; eventId?: string }): Promise<void>
+  forwardOwnerText(input: {
+    text: string
+    userId: string
+    chatId?: string
+    eventId?: string
+    /** Phone → desk media. Images arrive here so the agent can actually see
+     *  what the owner sent; Alice writes them into the Workspace. */
+    attachments?: import('@traderalice/connector-protocol').InboundAttachment[]
+  }): Promise<void>
   enqueueArtifactRequest(input: { entryId: string; docIndex: number }): Promise<string>
   enqueueUtaRequest(input: {
     action: 'review' | 'push' | 'reject'

@@ -28,6 +28,7 @@ import type { Tool } from 'ai'
 import type { SessionRuntimeSelection } from '../workspaces/session-runtime-binding.js'
 import type { IInboxStore, InboxEntry, InboxOrigin } from './inbox-store.js'
 import type { IEntityStore } from './entity-store.js'
+import type { IMemoryStore } from './memory-store.js'
 import type { IProvenanceStore } from './provenance-store.js'
 import type { ArtifactRef, SessionOrigin } from './provenance-store.js'
 // TYPE-ONLY: the global-issue-board shapes. Importing them as types keeps
@@ -191,6 +192,10 @@ export interface WorkspaceToolContext {
    *  entity_upsert / entity_search read and write. Same injection rationale
    *  as inboxStore. */
   entityStore: IEntityStore
+  /** Durable user-global agent memory (entries + RULE.md). Optional so
+   *  existing/tests literals keep typechecking; the live build sites inject it
+   *  from `ctx.memoryStore`. */
+  memoryStore?: IMemoryStore
   /** Durable Session -> artifact occurrence trail. Optional for older/tests. */
   provenanceStore?: IProvenanceStore
   /** Resolve ANY workspace's location by id (not just this one) — the backing

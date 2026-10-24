@@ -426,13 +426,34 @@ export const watcherBoardSyncSchema = z.object({
 export type WatcherBoardSync = z.infer<typeof watcherBoardSyncSchema>
 export type OwnerChatMessage = z.infer<typeof ownerChatMessageSchema>
 
+/** Inbound owner media (phone → desk). Deliberately a separate shape from
+ *  {@link connectorAttachmentSchema}: that one is outbound delivery capped at
+ *  1 MiB, this one is what the owner sends and needs to survive Telegram's
+ *  photo compression. Never widen the outbound schema to cover both. */
+export const MAX_INBOUND_ATTACHMENT_BYTES = 5 * 1024 * 1024
+
+export const inboundAttachmentSchema = z.object({
+  filename: z.string().min(1).max(255),
+  mediaType: z.string().min(1).max(128),
+  sizeBytes: z.number().int().min(0).max(MAX_INBOUND_ATTACHMENT_BYTES),
+  /** Content-addressed on the Alice side; the sender's name is not trusted. */
+  contentBase64: z.string().min(1).max(7_000_000),
+})
+export type InboundAttachment = z.infer<typeof inboundAttachmentSchema>
+
 export const inboundOwnerMessageSchema = z.object({
   connectorId: z.string().min(1),
   eventId: z.string().min(1).max(128).optional(),
   userId: z.string().min(1),
   chatId: z.string().min(1).optional(),
-  text: z.string().min(1).max(OWNER_CHAT_TEXT_MAX),
-})
+  /** Optional so a bare photo (no caption) is still a valid turn. Refined
+   *  below: at least one of text/attachments must be present. */
+  text: z.string().max(OWNER_CHAT_TEXT_MAX).optional(),
+  attachments: z.array(inboundAttachmentSchema).max(MAX_CONNECTOR_ATTACHMENTS).optional(),
+}).refine(
+  (value) => Boolean(value.text?.trim()) || Boolean(value.attachments?.length),
+  { message: 'an inbound message needs text or at least one attachment' },
+)
 export type InboundOwnerMessage = z.infer<typeof inboundOwnerMessageSchema>
 export type ClaimedInboundOwnerMessage = InboundOwnerMessage & { queueId: string }
 export interface ConnectorWorkClaim<T> { claimId: string; items: T[] }

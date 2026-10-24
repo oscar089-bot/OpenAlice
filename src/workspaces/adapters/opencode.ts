@@ -132,6 +132,9 @@ function openCodeProvider(cred: WorkspaceAiCred, name: string): Record<string, u
   const provider: Record<string, unknown> = { npm, name, options };
   if (cred.model) {
     const model: Record<string, unknown> = { name: cred.model };
+    // Without this, OpenCode treats a custom model as text-only and refuses
+    // image attachments before the request is made.
+    model['modalities'] = { input: ['text', 'image'], output: ['text'] };
     if (typeof cred.reasoning === 'boolean') model['reasoning'] = cred.reasoning;
     const effortOptions = modelEffortOptions(cred);
     if (effortOptions) model['options'] = effortOptions;
@@ -358,7 +361,16 @@ export const opencodeAdapter: CliAdapter = {
       if (!config || typeof config !== 'object' || Array.isArray(config)) {
         throw new Error('OPENCODE_CONFIG_CONTENT must contain a JSON object');
       }
-      env['OPENCODE_CONFIG_CONTENT'] = JSON.stringify({ ...config, permission: 'allow' });
+      // OpenCode has no append-system-prompt flag; `instructions` is its
+      // equivalent. Point at the durable memory files so every session loads
+      // the standing rules and the current index.
+      const memoryDir = _ctx.env['OPENALICE_MEMORY_DIR'];
+      const instructions = memoryDir ? [join(memoryDir, 'RULE.md'), join(memoryDir, 'MEMORY.md')] : [];
+      env['OPENCODE_CONFIG_CONTENT'] = JSON.stringify({
+        ...config,
+        ...(instructions.length > 0 ? { instructions } : {}),
+        permission: 'allow',
+      });
       return { env, interactiveArgs, headlessArgs, webArgs: [] };
     },
   },

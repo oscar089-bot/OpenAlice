@@ -901,6 +901,7 @@ export const ja: Resources = {
       harness: 'Harness',
       connectors: 'コネクター',
       mcpServer: 'MCP サーバー',
+      memory: 'メモリ',
       marketData: 'マーケットデータ',
       newsSources: 'ニュースソース',
       beta: 'ベータ',

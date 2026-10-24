@@ -7,6 +7,7 @@ type Step =
   | 'sessions'
   | 'session-actions'
   | 'confirm-delete'
+  | 'deleted'
   | 'create-policy'
   | 'create-agent'
   | 'create-credential'
@@ -21,6 +22,9 @@ type State = {
   page: number
   busy: boolean
   selectedResumeId?: string
+  /** Label of the Session just deleted, held only so the success screen can
+   *  name it after the roster has already forgotten it. */
+  deletedLabel?: string
   draft: NonNullable<ConnectorSessionRequest['draft']>
 }
 const PAGE_SIZE = 6
@@ -136,17 +140,37 @@ export class TelegramSessionControls {
           state.step = 'confirm-delete'
           break
         case 'switch':
-        case 'delete':
           if (!state.selectedResumeId) throw new Error('Pick a Session first.')
           state.panel = await call({
             resumeId: state.selectedResumeId,
             revision: state.panel.revision,
-            ...(action === 'delete' ? { delete: true } : {}),
             apply: true,
           })
           state.selectedResumeId = undefined
           state.step = 'sessions'
           break
+        case 'delete': {
+          if (!state.selectedResumeId) throw new Error('Pick a Session first.')
+          // Capture the label BEFORE the commit: the refreshed roster no
+          // longer contains the row, and the success screen must still name
+          // what it removed rather than saying "a Session".
+          const removed = state.panel.sessions.find(
+            (row) => row.resumeId === state.selectedResumeId,
+          )?.label ?? state.selectedResumeId
+          state.panel = await call({
+            resumeId: state.selectedResumeId,
+            revision: state.panel.revision,
+            delete: true,
+            apply: true,
+          })
+          state.selectedResumeId = undefined
+          state.deletedLabel = removed
+          // A deleted Session deserves an explicit, acknowledged result. Going
+          // straight back to the list made a destructive action look like a
+          // no-op and left the owner with no way to tell it had happened.
+          state.step = 'deleted'
+          break
+        }
         case 'start-create':
           // The draft is reset so a previous attempt cannot leak into this one.
           state.draft = { policy: null, agent: null, credential: null, model: null, effort: null }
@@ -215,7 +239,7 @@ export class TelegramSessionControls {
         ? 'A fresh Session on every run'
         : 'A fresh Session on the next message'
     const lines = [
-      panel.saved ? 'Saved.' : 'Session settings',
+      step === 'deleted' ? 'Session deleted.' : panel.saved ? 'Saved.' : 'Session settings',
       `Current: ${current}`,
     ]
     if (panel.running) lines.push('A reply is running. Switch and delete are unavailable until it finishes.')
@@ -274,7 +298,21 @@ export class TelegramSessionControls {
       }
       if (step === 'confirm-delete') lines.push('', 'Delete this Session and its messages permanently?')
     }
-    lines.push('', 'Deleting removes that Session and its messages for good.')
+    if (step === 'deleted') {
+      lines.push('', `Deleted: ${state.deletedLabel ?? 'that Session'}`)
+      lines.push('Its messages are gone for good.')
+      const remaining = panel.sessions.length
+      lines.push(
+        remaining > 0
+          ? `Current: ${current} · ${remaining} Session${remaining === 1 ? '' : 's'} left.`
+          : 'No Sessions left in this desk Workspace.',
+      )
+    }
+    // The warning belongs on a screen where deleting is still possible, never
+    // on the acknowledgement that it already happened.
+    if (step !== 'deleted') {
+      lines.push('', 'Deleting removes that Session and its messages for good.')
+    }
     return lines.join('\n').slice(0, 3900)
   }
 
@@ -331,6 +369,9 @@ export class TelegramSessionControls {
       rows.push([button('Back', 'step:create-model')])
     } else if (state.step === 'created') {
       rows.push([button('Done', 'close')])
+    } else if (state.step === 'deleted') {
+      rows.push([button('Done', 'close')])
+      rows.push([button('Back to Sessions', 'view:sessions')])
     }
     return { inline_keyboard: rows }
   }

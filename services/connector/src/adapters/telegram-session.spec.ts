@@ -153,6 +153,29 @@ describe('TelegramSessionControls', () => {
     })
   })
 
+  it('acknowledges a completed delete instead of dropping back to the list', async () => {
+    const { controls, ctx, nonce } = await opened(panel())
+    // The refreshed roster no longer contains the deleted row, which is why the
+    // success screen has to remember the label itself.
+    const call = vi.fn(async () => panel({ sessions: [panel().sessions[0]!] }))
+    await controls.handle(press(ctx, nonce, 'view:sessions'), call)
+    await controls.handle(press(ctx, lastNonce(ctx), 'pick:1'), call)
+    await controls.handle(press(ctx, lastNonce(ctx), 'ask-delete'), call)
+    await controls.handle(press(ctx, lastNonce(ctx), 'delete'), call)
+
+    const shown = ctx.editMessageText.mock.calls.at(-1)![0] as string
+    expect(shown).toContain('Session deleted.')
+    expect(shown).toContain('Desk old')
+    // The destructive warning is gone; the result is what matters now.
+    expect(shown).not.toContain('Deleting removes that Session')
+
+    const markup = ctx.editMessageText.mock.calls.at(-1)![1] as {
+      reply_markup: { inline_keyboard: { text: string; callback_data: string }[][] }
+    }
+    const labels = markup.reply_markup.inline_keyboard.flat().map((b) => b.text)
+    expect(labels).toContain('Done')
+  })
+
   it('surfaces a server refusal when a reply is running', async () => {
     const { controls, ctx, nonce } = await opened(panel({ running: true }))
     const call = vi.fn(async () => {

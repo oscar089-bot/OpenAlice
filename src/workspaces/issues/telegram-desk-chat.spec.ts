@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -123,6 +123,117 @@ describe('telegram desk ingest and stamp', () => {
     expect(result.comment.via).toBe('telegram')
     expect(result.comment.markdown).toBe('What is the overnight risk?')
     expect(shouldProjectDeskComment(created.ok ? created.issue : { connectorDesk: 'telegram' }, result.comment)).toBe(false)
+  })
+
+  it('writes an inbound image into the workspace and references it in the comment', async () => {
+    const created = await createTelegramConnectorDesk(
+      { id: 'ws-a', dir: wsDir },
+      [{ id: 'ws-a', dir: wsDir }],
+    )
+    expect(created.ok).toBe(true)
+    const { client } = mockClient()
+    // One-pixel PNG; the store only needs valid bytes, not a decodable image.
+    const png = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      'base64',
+    )
+    const result = await ingestTelegramOwnerMessage(host(), {
+      connectorId: 'telegram',
+      userId: '42',
+      text: 'What is this setup?',
+      attachments: [{
+        filename: 'chart.png',
+        mediaType: 'image/png',
+        sizeBytes: png.byteLength,
+        contentBase64: png.toString('base64'),
+      }],
+    }, client)
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.comment.markdown).toContain('What is this setup?')
+    expect(result.comment.markdown).toContain('![image](.alice/inbox-media/')
+
+    // The referenced file must actually exist, or the agent would read nothing.
+    const match = /!\[image\]\(([^)]+)\)/.exec(result.comment.markdown)
+    expect(match).not.toBeNull()
+    const written = await readFile(join(wsDir, match![1]!), 'utf-8')
+    expect(written.length).toBeGreaterThan(0)
+  })
+
+  it('keeps several images from one album in a single comment', async () => {
+    const created = await createTelegramConnectorDesk(
+      { id: 'ws-a', dir: wsDir },
+      [{ id: 'ws-a', dir: wsDir }],
+    )
+    expect(created.ok).toBe(true)
+    const { client } = mockClient()
+    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xd9])
+    const attachment = (name: string) => ({
+      filename: name,
+      mediaType: 'image/jpeg',
+      sizeBytes: jpeg.byteLength,
+      contentBase64: jpeg.toString('base64'),
+    })
+
+    const result = await ingestTelegramOwnerMessage(host(), {
+      connectorId: 'telegram',
+      userId: '42',
+      text: 'Two timeframes',
+      attachments: [attachment('h4.jpg'), attachment('m15.jpg')],
+    }, client)
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.comment.markdown.match(/!\[image\]/g) ?? []).toHaveLength(2)
+  })
+
+  it('accepts an image with no caption at all', async () => {
+    const created = await createTelegramConnectorDesk(
+      { id: 'ws-a', dir: wsDir },
+      [{ id: 'ws-a', dir: wsDir }],
+    )
+    expect(created.ok).toBe(true)
+    const { client } = mockClient()
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47])
+    const result = await ingestTelegramOwnerMessage(host(), {
+      connectorId: 'telegram',
+      userId: '42',
+      attachments: [{
+        filename: 'only.png',
+        mediaType: 'image/png',
+        sizeBytes: png.byteLength,
+        contentBase64: png.toString('base64'),
+      }],
+    }, client)
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.comment.markdown).toContain('![image]')
+  })
+
+  it('ignores an attachment type it cannot render rather than failing the turn', async () => {
+    const created = await createTelegramConnectorDesk(
+      { id: 'ws-a', dir: wsDir },
+      [{ id: 'ws-a', dir: wsDir }],
+    )
+    expect(created.ok).toBe(true)
+    const { client } = mockClient()
+    const result = await ingestTelegramOwnerMessage(host(), {
+      connectorId: 'telegram',
+      userId: '42',
+      text: 'see attached',
+      attachments: [{
+        filename: 'notes.pdf',
+        mediaType: 'application/pdf',
+        sizeBytes: 4,
+        contentBase64: Buffer.from('data').toString('base64'),
+      }],
+    }, client)
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.comment.markdown).toBe('see attached')
   })
 
   it('leaves activity lifecycle to the dispatched turn', async () => {

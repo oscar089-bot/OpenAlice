@@ -911,6 +911,7 @@ export const en = {
       harness: 'Harness',
       connectors: 'Connectors',
       mcpServer: 'MCP Server',
+      memory: 'Memory',
       marketData: 'Market Data',
       newsSources: 'News Sources',
       beta: 'Beta',

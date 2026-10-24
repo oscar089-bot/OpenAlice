@@ -899,6 +899,7 @@ export const zh: Resources = {
       harness: 'Harness',
       connectors: '连接器',
       mcpServer: 'MCP 服务器',
+      memory: '记忆',
       marketData: '市场数据',
       newsSources: '新闻源',
       beta: '测试版',

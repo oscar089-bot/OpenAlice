@@ -337,7 +337,11 @@ export const piAdapter: CliAdapter = {
     // The runtime lifecycle records trust for this OpenAlice-managed Workspace
     // before every launch. Keeping argv free of `--approve` preserves
     // compatibility with external Pi 0.78.x runtimes that predate the flag.
-    const head = [...piCommandHead(ctx.env), ...(ctx.sessionRuntime?.interactiveArgs ?? [])];
+    const head = [
+      ...piCommandHead(ctx.env),
+      ...(ctx.sessionRuntime?.interactiveArgs ?? []),
+      ...(ctx.appendSystemPrompt ? ['--append-system-prompt', ctx.appendSystemPrompt] : []),
+    ];
     // Quick-chat seed: `pi [--session-id <id>] <messages…>` opens the
     // interactive TUI seeded with that first message. UNLIKE the other adapters,
     // pi appends the seed REGARDLESS of the resume branch: pi assigns its own id
@@ -406,6 +410,7 @@ export const piAdapter: CliAdapter = {
       ...piCommandHead(_ctx.env),
       ...piHeadlessApproveArgs(_ctx.env),
       ...(_ctx.sessionRuntime?.headlessArgs ?? []),
+      ...(_ctx.appendSystemPrompt ? ['--append-system-prompt', _ctx.appendSystemPrompt] : []),
       ...(_ctx.resume === 'last'
         ? ['--continue']
         : _ctx.resume

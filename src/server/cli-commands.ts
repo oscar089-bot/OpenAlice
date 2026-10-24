@@ -152,6 +152,8 @@ const BASE_EXPORTS: Record<string, CliExport> = {
       signature: 'Show this Session\'s safe product identity',
       session: 'Rename or inspect this Workspace\'s product Sessions',
       track: 'Maintain the shared index of durable assets and topics',
+      memory: 'Recall durable cross-session lessons, and record or forget one with the owner\'s approval',
+      skill: 'Inspect this Workspace\'s installed skills, and patch one with the owner\'s approval',
       harness: 'Review and update Project-provided Skill files while respecting Workspace preferences',
       template: 'Preview or apply managed Workspace-template updates',
     },
@@ -208,6 +210,18 @@ const BASE_EXPORTS: Record<string, CliExport> = {
       track: {
         add: 'entity_upsert',
         search: 'entity_search',
+      },
+      // memory: durable cross-session lessons. `recall` is free; `save` and
+      // `forget` must be approved by the owner in conversation first.
+      memory: {
+        recall: 'memory_recall',
+        save: 'memory_save',
+        forget: 'memory_forget',
+      },
+      // skill: inspect this Workspace's installed skills, and patch one.
+      skill: {
+        list: 'skill_list',
+        patch: 'skill_patch',
       },
       // Current-Workspace managed template reconciliation. Preview is the
       // default; `--apply` explicitly performs the reviewed safe operation.

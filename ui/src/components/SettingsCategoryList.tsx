@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next'
 import {
   Activity,
   Bot,
+  Brain,
   Ghost,
   Gauge,
   Camera,
@@ -111,6 +112,7 @@ const CATEGORY_GROUPS = [
     items: [
       { labelKey: 'settings.category.connectors', category: 'connectors', Icon: Plug },
       { labelKey: 'settings.category.mcpServer', category: 'mcp', Icon: Plug },
+      { labelKey: 'settings.category.memory', category: 'memory', Icon: Brain },
     ],
   },
 ] as const

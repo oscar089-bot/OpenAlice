@@ -179,6 +179,7 @@ import {
 import { NEW_EACH_RUN_ASSIGNEE, NEW_THEN_RESUME_ASSIGNEE, sessionSignature } from './session-signature.js';
 import { issueRunFailure } from './issues/run-failure.js';
 import type { IInboxStore } from '@/core/inbox-store.js';
+import type { IMemoryStore } from '@/core/memory-store.js';
 import { OfficeDayStore } from '@/core/office-day-store.js';
 import { RoutineFollowUpStore } from '@/core/routine-follow-up-store.js';
 import { toSafeInboxOrigin } from '@/core/workspace-tool-center.js';
@@ -729,6 +730,11 @@ export interface CreateWorkspaceServiceOptions {
    *  every surface (HTTP / CLI / MCP) gets the join, not just the route.
    *  Optional: when absent, `issueDetail` returns `inboxReports: []`. */
   readonly inboxStore?: IInboxStore;
+  /** Durable user-global agent memory. When present, RULE.md plus the index
+   *  snapshot are appended to every spawned Session's system prompt, and its
+   *  directory is exposed as OPENALICE_MEMORY_DIR for runtimes that do not
+   *  accept an appended prompt. Optional so existing specs keep working. */
+  readonly memoryStore?: IMemoryStore;
 }
 
 /**
@@ -751,6 +757,33 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
   const config = loadConfig({ webPort: opts.webPort });
   const executeHeadlessTask = opts.runHeadlessTask ?? runHeadlessTask;
   const inboxStore = opts.inboxStore;
+  const memoryStore = opts.memoryStore;
+
+  // Composed once per mutation, not per spawn: the rule text is stable and the
+  // index only changes when an entry is written. `composeSpawnInputs` is
+  // synchronous, so this stays a plain string refreshed asynchronously.
+  let memoryPrompt = '';
+  const refreshMemoryPrompt = async (): Promise<void> => {
+    if (!memoryStore) return;
+    try {
+      const rule = await memoryStore.rule();
+      const snapshot = await memoryStore.snapshot();
+      memoryPrompt = [
+        rule.trim(),
+        snapshot
+          ? `## Persistent Memory (cross-session)\n\n${snapshot}\n\nRecall before you act; save only with the owner's explicit approval.`
+          : "## Persistent Memory (cross-session)\n\nNo entries yet. Record a lesson only with the owner's explicit approval.",
+      ]
+        .filter(Boolean)
+        .join('\n\n');
+    } catch (err) {
+      launcherLogger.warn('memory.prompt_refresh_failed', { err });
+    }
+  };
+  await refreshMemoryPrompt();
+  memoryStore?.onChanged(() => {
+    void refreshMemoryPrompt();
+  });
   const officeDayStore = await OfficeDayStore.loadOrUnavailable();
   if (!officeDayStore.available) {
     launcherLogger.error('office_day_store.load_failed', {
@@ -1379,6 +1412,9 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
       // script — not written into the workspace, so it never pollutes the
       // workspace's git repo.
       OPENALICE_WORKSPACE_CLI_BIN_PATH: cliBinPath(),
+      // Where the durable memory lives, so any runtime can read RULE.md and
+      // MEMORY.md even when its CLI has no append-system-prompt flag.
+      ...(memoryStore ? { OPENALICE_MEMORY_DIR: memoryStore.root } : {}),
       // Per-workspace git identity — so any commit the agent makes (in its own
       // repo OR a peer's, during cross-workspace collaboration) self-attributes
       // to this workspace, and never fails for a missing identity on a clean
@@ -1417,7 +1453,14 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
       ...(projection?.env ?? {}),
     };
     const env = { ...baseEnv, ...adapterEnv };
-    const commandCtx = { ...baseCtx, env };
+    const commandCtx = {
+      ...baseCtx,
+      env,
+      // Standing rules + memory index, appended by adapters that accept one
+      // (claude/pi/omp/grok). Runtimes without that flag get
+      // OPENALICE_MEMORY_DIR below and the rule text tells them to read it.
+      ...(memoryPrompt ? { appendSystemPrompt: memoryPrompt } : {}),
+    };
 
     // Quick-chat seed — the caller (the pool factory) passes `initialPrompt` ONLY
     // on a genuinely fresh spawn, so we don't re-gate on `resume` (pi rewrites a
@@ -1571,6 +1614,7 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
         cwd,
         env,
         ...(sessionRuntimeProjection ? { sessionRuntime: sessionRuntimeProjection } : {}),
+        ...(memoryPrompt ? { appendSystemPrompt: memoryPrompt } : {}),
       },
       RUNTIME_READINESS_PROMPT,
     );
@@ -1925,6 +1969,7 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
           cwd,
           env,
           ...(sessionRuntimeProjection ? { sessionRuntime: sessionRuntimeProjection } : {}),
+          ...(memoryPrompt ? { appendSystemPrompt: memoryPrompt } : {}),
           ...(opts.resume !== undefined ? { resume: opts.resume } : {}),
         },
         prompt,
@@ -3693,7 +3738,9 @@ const WATCH_ALERT_CONNECTORS: string[] = ['discord', 'telegram'];
       env,
       resume,
       ...(sessionRuntimeProjection ? { sessionRuntime: sessionRuntimeProjection } : {}),
-      ...(opts.appendSystemPrompt ? { appendSystemPrompt: opts.appendSystemPrompt } : {}),
+      ...((memoryPrompt || opts.appendSystemPrompt)
+        ? { appendSystemPrompt: [memoryPrompt, opts.appendSystemPrompt].filter(Boolean).join('\n\n') }
+        : {}),
       ...(opts.skills ? { skills: opts.skills } : {}),
       ...(opts.approveProject ? { approveProject: true } : {}),
     });

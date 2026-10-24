@@ -17,6 +17,7 @@ import type { ToolCenter } from '../core/tool-center.js'
 import type { WorkspaceToolCenter } from '../core/workspace-tool-center.js'
 import type { IInboxStore } from '../core/inbox-store.js'
 import type { IEntityStore } from '../core/entity-store.js'
+import type { IMemoryStore } from '../core/memory-store.js'
 import type { WorkspaceService } from '../workspaces/service.js'
 import { registerCliRoutes } from './cli.js'
 
@@ -25,6 +26,7 @@ export interface LocalToolGatewayDeps {
   readonly workspaceToolCenter: WorkspaceToolCenter
   readonly inboxStore: IInboxStore
   readonly entityStore: IEntityStore
+  readonly memoryStore?: IMemoryStore
   readonly getWorkspaceService: () => WorkspaceService | null
 }
 

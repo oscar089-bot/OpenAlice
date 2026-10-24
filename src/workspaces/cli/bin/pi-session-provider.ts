@@ -28,7 +28,12 @@ export default function openAliceSessionProvider(pi: {
         models: models.map((model) => ({
           name: model['id'],
           reasoning: false,
-          input: ['text'],
+          // Custom providers are declared image-capable by default. Pi treats a
+          // missing modality as text-only and rejects the attachment before it
+          // ever reaches the model, which is what broke screenshot analysis for
+          // every multimodal OpenAI-compatible endpoint. A caller that truly
+          // cannot take images overrides `input` on the model entry.
+          input: ['text', 'image'],
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
           contextWindow: 128000,
           maxTokens: 16384,

@@ -42,4 +42,8 @@ describe.each(Object.entries(locales))('%s locale', (_locale, resources) => {
     expect(resources.settings.agentRuntimes.quickAccess).toBeTruthy()
     expect(resources.chatLanding.otherRuntimes).toBeTruthy()
   })
+
+  it('exposes Memory as a Settings category', () => {
+    expect(resources.settings.category.memory).toBeTruthy()
+  })
 })

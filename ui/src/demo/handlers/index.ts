@@ -4,6 +4,7 @@ import { tradingHandlers } from './trading'
 import { workspacesHandlers } from './workspaces'
 import { inboxHandlers } from './inbox'
 import { entitiesHandlers } from './entities'
+import { memoryHandlers } from './memory'
 import { scheduleHandlers } from './schedule'
 import { issuesHandlers } from './issues'
 import { wikilinkHandlers } from './wikilink'
@@ -35,6 +36,7 @@ export const handlers = [
   ...workspacesHandlers,
   ...inboxHandlers,
   ...entitiesHandlers,
+  ...memoryHandlers,
   ...scheduleHandlers,
   ...issuesHandlers,
   ...wikilinkHandlers,
