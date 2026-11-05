@@ -110,14 +110,44 @@ export function connectorDeskTimeoutMs(): number {
   return ISSUE_TIMEOUT_MS[CONNECTOR_DESK_RUN_TIMEOUT]
 }
 
-/** Effective watchdog for one Issue run. Connector desks are always bounded so
- *  a hung owner-chat turn cannot hold the draft indicator open forever. */
+/**
+ * Watcher runs are bounded even when the Issue omits an explicit `timeout`.
+ *
+ * A watcher fire is not an open-ended research turn. The watch loop skips a
+ * pair while `isIssueRunning` reports a live run, so ONE agent process that
+ * never exits silently stops that watcher forever: every later fire parks in
+ * the pending queue and the owner sees an alert followed by nothing. Observed
+ * in the wild as a desk wedged for days after the second fire.
+ *
+ * Kept separate from the connector-desk budget so the two policies can move
+ * independently, even though they currently agree.
+ */
+export const WATCH_RUN_TIMEOUT: IssueTimeout = '30m'
+
+export function watchRunTimeoutMs(): number {
+  return ISSUE_TIMEOUT_MS[WATCH_RUN_TIMEOUT]
+}
+
+/** Effective watchdog for one Issue run.
+ *
+ *  Precedence: explicit `timeout:` in the Issue frontmatter wins, then the
+ *  structural defaults for connector desks and watchers, then unbounded.
+ *
+ *  An ordinary Issue with no `timeout` remains UNBOUNDED on purpose — a long
+ *  research or backtest run is legitimate, and arming a ceiling there would
+ *  turn a slow-but-healthy run into a false failure. Only the two shapes whose
+ *  hang is self-perpetuating (owner chat blocked, watch loop stalled) get a
+ *  default. */
 export function issueRunTimeoutMs(
-  issue: Pick<IssueRecord, 'timeout'> & Pick<IssueRecord, 'connectorDesk'>,
+  issue: Pick<IssueRecord, 'timeout'> &
+    Pick<IssueRecord, 'connectorDesk'> &
+    Pick<IssueRecord, 'watch'>,
 ): number | undefined {
   const explicit = issueTimeoutMs(issue.timeout)
   if (explicit !== undefined) return explicit
-  return isConnectorDeskIssue(issue) ? connectorDeskTimeoutMs() : undefined
+  if (isConnectorDeskIssue(issue)) return connectorDeskTimeoutMs()
+  if (hasWatch(issue)) return watchRunTimeoutMs()
+  return undefined
 }
 
 /** Statuses at which a scheduled issue stops firing (it's resolved/abandoned).

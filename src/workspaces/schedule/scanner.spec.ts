@@ -154,6 +154,7 @@ function scannerFor(
     isIssueRunning?: ScheduleScannerDeps['isIssueRunning']
     observeIssues?: ScheduleScannerDeps['observeIssues']
     reconcileSessionRuntimeBindings?: ScheduleScannerDeps['reconcileSessionRuntimeBindings']
+    reapStaleRuns?: ScheduleScannerDeps['reapStaleRuns']
   } = {},
 ) {
   const dispatch = vi.fn(opts.dispatch ?? (async () => ({ taskId: 'run-1', resumeId: 'resume-new-worker-a1b2c3' })))
@@ -161,6 +162,7 @@ function scannerFor(
   const scanner = new ScheduleScanner({
     canRetryIssueRun: opts.canRetryIssueRun,
     isIssueRunning: opts.isIssueRunning,
+    reapStaleRuns: opts.reapStaleRuns,
     registry: {
       list: () => workspaces,
       get: (id: string) => workspaces.find((workspace) => workspace.id === id),
@@ -188,6 +190,34 @@ describe('ScheduleScanner', () => {
 
     await scanner.scan()
 
+    expect(reconcileSessionRuntimeBindings).toHaveBeenCalledOnce()
+  })
+
+  it('reaps stale runs BEFORE evaluating any workspace', async () => {
+    const ws = await makeWs('w1', [])
+    const order: string[] = []
+    const reapStaleRuns = vi.fn(async () => { order.push('reap') })
+    const reconcileSessionRuntimeBindings = vi.fn(async () => { order.push('reconcile') })
+    const { scanner } = scannerFor([ws], { reapStaleRuns, reconcileSessionRuntimeBindings })
+
+    await scanner.scan()
+
+    expect(reapStaleRuns).toHaveBeenCalledOnce()
+    // Ordering is the whole point: a wedged `running` record makes
+    // `isIssueRunning` true, so reaping after evaluation would leave the
+    // Issue parked for another full pass.
+    expect(order).toEqual(['reap', 'reconcile'])
+  })
+
+  it('keeps scanning when the reaper fails', async () => {
+    const ws = await makeWs('w1', [])
+    const reapStaleRuns = vi.fn(async () => { throw new Error('registry unavailable') })
+    const reconcileSessionRuntimeBindings = vi.fn(async () => undefined)
+    const { scanner } = scannerFor([ws], { reapStaleRuns, reconcileSessionRuntimeBindings })
+
+    // A broken reaper must not take the scheduler down with it: the tick still
+    // reconciles and every healthy Issue still fires.
+    await expect(scanner.scan()).resolves.toBeUndefined()
     expect(reconcileSessionRuntimeBindings).toHaveBeenCalledOnce()
   })
 

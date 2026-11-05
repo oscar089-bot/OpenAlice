@@ -13,6 +13,21 @@ const blockSchema = z.object({
 export type SessionBlock = z.infer<typeof blockSchema>
 const stateSchema = z.object({ version: z.literal(1), cooldownSeconds: z.number().int().min(10).max(86400), blocks: z.array(blockSchema), failures: z.record(z.string(), z.number().int().nonnegative()) }).strict()
 
+/**
+ * Lifetime of an `execution-fault` block.
+ *
+ * This block used to have NO expiry, so three transient failures wedged a
+ * Session until a human released it in the web UI — unreachable from Telegram,
+ * and invisible to a user who only ever talked to the phone desk. One bad
+ * streak therefore cost days of silence.
+ *
+ * The block still stops a broken Session from retry-storming, but it now heals
+ * itself: after this window the failure streak is reset and the next attempt
+ * gets a fresh budget. A genuinely broken runtime simply re-blocks, which is
+ * the correct signal, while a transient fault recovers on its own.
+ */
+const FAULT_RETRY_MS = 30 * 60_000
+
 export class SessionAdmissionError extends Error {
   readonly code = 'session_blocked'
   readonly retryAt?: number
@@ -30,8 +45,25 @@ export class SessionAdmission {
   private constructor(private readonly file: string) {}
   static async open(file: string) {
     const policy = new SessionAdmission(file)
-    try { policy.state = stateSchema.parse(JSON.parse(await readFile(file, 'utf8'))) }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+    let loaded = false
+    try {
+      policy.state = stateSchema.parse(JSON.parse(await readFile(file, 'utf8')))
+      loaded = true
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+    // Repair blocks written before `execution-fault` had a lifetime. Those
+    // records carry no `expiresAt`, so every expiry check treats them as
+    // permanently active — the exact wedge this change is meant to remove.
+    // Anchoring the deadline to `createdAt` means an old block expires on the
+    // next start instead of surviving forever.
+    if (loaded) {
+      let repaired = false
+      for (const block of policy.state.blocks) {
+        if (block.kind !== 'execution-fault' || block.expiresAt !== undefined) continue
+        block.expiresAt = block.createdAt + FAULT_RETRY_MS
+        repaired = true
+      }
+      if (repaired) await policy.persist().catch(() => {})
+    }
     return policy
   }
   get cooldownSeconds() { return this.state.cooldownSeconds }
@@ -56,9 +88,19 @@ export class SessionAdmission {
     await this.persist()
   }
   async outcome(resumeId: string, executionId: string, failed: boolean, reason: string) {
+    const now = Date.now()
+    // Retire an expired fault block BEFORE counting, so the streak starts from
+    // zero instead of immediately re-tripping the guard on the next failure.
+    for (const block of this.state.blocks) {
+      if (block.resumeId !== resumeId || block.kind !== 'execution-fault' || block.releasedAt) continue
+      if (block.expiresAt !== undefined && block.expiresAt <= now) {
+        block.releasedAt = block.expiresAt
+        this.state.failures[resumeId] = 0
+      }
+    }
     this.state.failures[resumeId] = failed ? (this.state.failures[resumeId] ?? 0) + 1 : 0
     if (this.state.failures[resumeId] >= 3 && !this.blocks(resumeId).some(block => block.kind === 'execution-fault')) {
-      this.state.blocks.push({ id: randomUUID(), resumeId, executionId, kind: 'execution-fault', createdAt: Date.now(),
+      this.state.blocks.push({ id: randomUUID(), resumeId, executionId, kind: 'execution-fault', createdAt: now, expiresAt: now + FAULT_RETRY_MS,
         actor: { kind: 'system', entry: 'session-failure-policy' }, reason: `Three consecutive executions failed. Review the failure before allowing another start (${reason}).` })
     }
     await this.persist()

@@ -48,7 +48,7 @@ export interface ExecutionRecord extends ExecutionRequest {
 }
 export interface ExecutionDriver<T> {
   /** Returning means the process is ready, not merely that spawn was requested. */
-  start(report: (activity: string) => Promise<void>, signal: AbortSignal): Promise<{ value: T; pid?: number; taskId?: string; completed: Promise<{ reason: string; failed?: boolean; interrupted?: boolean }> }>
+  start(report: (activity: string) => Promise<void>, signal: AbortSignal): Promise<{ value: T; pid?: number; taskId?: string; completed: Promise<{ reason: string; failed?: boolean; interrupted?: boolean; fault?: boolean }> }>
   /** Resolves only after the process has exited. Also used after partial startup. */
   stop(reason: string): Promise<void>
 }
@@ -172,7 +172,7 @@ export class SessionExecutionManager {
       await this.transition(record, 'running')
       controller.signal.throwIfAborted()
       const completion = launched.completed.then(
-        result => this.finish(record, result.interrupted ? 'interrupted' : result.failed ? 'failed' : 'ended', result.reason),
+        result => this.finish(record, result.interrupted ? 'interrupted' : result.failed ? 'failed' : 'ended', result.reason, false, result.fault !== false),
         async error => {
           if (error instanceof SessionTerminationError) {
             record.stopError = error.message
@@ -269,6 +269,34 @@ export class SessionExecutionManager {
     try { return await entry.stopping } finally { entry.stopping = undefined }
   }
 
+  /**
+   * Release an execution that outlived its watchdog without reporting an exit.
+   *
+   * The durable task record is reaped by {@link HeadlessTaskRegistry.reapStale};
+   * this clears the IN-MEMORY half, without which `start()` keeps throwing
+   * "Session execution is busy" forever because `finish()` never ran.
+   *
+   * Only safe once the watchdog budget plus grace has demonstrably elapsed:
+   * `sessionProcessStop` SIGKILLs the whole tree at the budget, so a process
+   * still unreported at budget+60s is already dead. Returns whether anything
+   * was released.
+   */
+  async reapUnconfirmed(resumeIds: Iterable<string>, reason: string): Promise<string[]> {
+    const released: string[] = []
+    for (const resumeId of resumeIds) {
+      const entry = this.active.get(resumeId)
+      // Only an execution this process still believes is live. A terminal or
+      // already-released record needs no second cleanup.
+      if (!entry || terminal(entry.record.phase)) continue
+      entry.record.stopError = reason
+      await this.transition(entry.record, 'interrupted', reason).catch(() => {})
+      this.active.delete(resumeId)
+      this.completions.delete(resumeId)
+      released.push(resumeId)
+    }
+    return released
+  }
+
   async stopAll(reason: string) {
     this.closing = true
     const takeoverErrors: unknown[] = []
@@ -285,11 +313,27 @@ export class SessionExecutionManager {
     return () => { this.locks.delete(resumeId); resolve() }
   }
 
-  private async finish(record: ExecutionRecord, phase: 'ended' | 'failed' | 'interrupted', reason: string, explicit = false) {
+  private async finish(
+    record: ExecutionRecord,
+    phase: 'ended' | 'failed' | 'interrupted',
+    reason: string,
+    explicit = false,
+    /** Whether this outcome may count toward the consecutive-failure counter.
+     *
+     *  `false` means the run is still shown as failed, but it was NOT a process
+     *  fault: a watchdog ceiling, an explicit interruption, or a clean exit
+     *  whose turn merely ended on an error event. Counting those would let
+     *  three ordinary finishes install an `execution-fault` block and wedge the
+     *  desk — which is exactly how a watcher desk went silent for days with
+     *  `child-exit:0` as the recorded "failure". */
+    fault = true,
+  ) {
     if (this.active.get(record.resumeId)?.record !== record || terminal(record.phase)) return
     // An explicit stop owns the completion reason; a natural callback cannot race it.
     if (record.phase === 'stopping' && !explicit) return
-    if (phase === 'failed' || (phase === 'ended' && !explicit)) await this.admission.outcome(record.resumeId, record.executionId, phase === 'failed', reason)
+    if (fault && (phase === 'failed' || (phase === 'ended' && !explicit))) {
+      await this.admission.outcome(record.resumeId, record.executionId, phase === 'failed', reason)
+    }
     if (record.phase === 'stopping' && !explicit) return
     await this.transition(record, phase, record.phase === 'stopping' ? record.reason ?? reason : reason)
     if (this.active.get(record.resumeId)?.record === record) {

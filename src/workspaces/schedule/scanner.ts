@@ -96,6 +96,15 @@ export interface ScheduleScannerDeps {
   resolveResumeWorkspace?: (resumeId: string) => WorkspaceMeta | undefined
   canRetryIssueRun?: (wsId: string, issueId: string, runId: string) => boolean
   isIssueRunning?: (wsId: string, issueId: string) => boolean
+  /**
+   * Fail runs that outlived their armed watchdog without reporting an exit.
+   *
+   * Called once at the head of every scan, BEFORE any workspace is evaluated.
+   * A wedged `running` record makes `isIssueRunning` true forever, which parks
+   * every later fire for that Issue; reaping first is what lets the next fire
+   * in the same pass actually dispatch.
+   */
+  reapStaleRuns?: () => Promise<unknown>
   resolveAdapter: (meta: WorkspaceMeta, agentId?: string, resumeId?: string) => CliAdapter | Promise<CliAdapter>
   dispatch: (
     meta: WorkspaceMeta,
@@ -452,6 +461,11 @@ export class ScheduleScanner {
     const nowMs = this.now()
     const seen = new Set<string>()
     try {
+      // Reap BEFORE evaluating: a run whose exit never reported must not keep
+      // its Issue looking busy for another full pass.
+      await this.deps.reapStaleRuns?.().catch((err) =>
+        this.deps.logger.warn('schedule.stale_reap_failed', { err }),
+      )
       await this.deps.reconcileSessionRuntimeBindings?.()
       // registry.list() order is preserved by Promise.all → stable display order.
       const extraDesks = extraConnectorDeskKeys(

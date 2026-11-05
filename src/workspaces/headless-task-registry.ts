@@ -302,6 +302,45 @@ export class HeadlessTaskRegistry {
     await this.flush()
   }
 
+  /**
+   * Fail any run that is provably past its own watchdog budget.
+   *
+   * `isIssueRunning` trusts `status === 'running'`, so a run whose process
+   * never reported an exit blocks its Issue forever: every later fire parks in
+   * the scanner queue and the owner hears nothing. That is reachable in two
+   * ways — a SIGKILL that never confirms, and a process that outlives a
+   * restart because `reconcile()` only runs at boot.
+   *
+   * The predicate is deliberately conservative: a record is only reaped when
+   * its ARMED budget has demonstrably elapsed plus a grace window. A run with
+   * no recorded budget (`undefined`, i.e. an ordinary unbounded Issue) is
+   * never touched, so this cannot kill legitimate long research.
+   *
+   * Returns the records it completed, for the caller to log or project.
+   */
+  async reapStale(
+    now: number = Date.now(),
+    graceMs = 60_000,
+  ): Promise<HeadlessTaskRecord[]> {
+    const reaped: HeadlessTaskRecord[] = []
+    for (const task of this.tasks) {
+      if (task.status !== 'running') continue
+      // `null` records an explicitly unlimited run; absence is historical or a
+      // non-Issue dispatch. Neither has a budget to overrun.
+      if (typeof task.timeoutMs !== 'number' || task.timeoutMs <= 0) continue
+      if (now < task.startedAt + task.timeoutMs + graceMs) continue
+      task.status = 'interrupted'
+      task.finishedAt = now
+      task.durationMs = now - task.startedAt
+      task.interruptionReason = 'watchdog-unconfirmed'
+      task.error = 'The run outlived its watchdog budget without reporting an exit; treated as interrupted so the Issue can run again.'
+      delete task.progress
+      reaped.push(task)
+    }
+    if (reaped.length > 0) await this.flush()
+    return reaped
+  }
+
   async setTerminalDelivery(taskId: string, delivery: NonNullable<HeadlessTaskRecord['terminalDelivery']>): Promise<void> {
     const rec = this.get(taskId)
     if (!rec) return

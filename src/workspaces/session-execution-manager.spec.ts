@@ -48,6 +48,59 @@ describe('Session execution authority', () => {
     expect(stop).toHaveBeenCalledWith('startup-failed')
     expect(manager.list()[0].phase).toBe('failed')
   })
+  it('records a watchdog kill as failed without installing the permanent fault block', async () => {
+    const { manager } = await setup()
+    // A bounded watcher run that overruns its budget three times must NOT
+    // wedge the desk. Before this, the third kill installed `execution-fault`,
+    // which has no expiry and blocks every later start until a human releases
+    // it in the web UI — unreachable from Telegram. That is the "stuck for
+    // days" failure.
+    for (let i = 0; i < 3; i++) {
+      const completed = deferred<{ reason: string; failed?: boolean; fault?: boolean }>()
+      await manager.start(request, {
+        start: async () => ({ value: null, completed: completed.promise }),
+        stop: async () => {},
+      })
+      completed.resolve({ reason: 'timeout', failed: true, fault: false })
+      await vi.waitFor(() => expect(manager.list().at(-1)!.phase).toBe('failed'))
+    }
+    expect(manager.admission.blocks('resume')).toEqual([])
+    expect(() => manager.admission.assertAllowed('resume')).not.toThrow()
+  })
+
+  it('never faults on a clean exit even when the turn ends on an error block', async () => {
+    const { manager } = await setup()
+    // The reported bug: `headlessTaskStatus` reports 'failed' when a turn ends
+    // on an error block, even with exit code 0. Three of those installed the
+    // permanent `execution-fault` block and the desk went silent for days with
+    // `child-exit:0` recorded as the reason. A clean exit is not a fault.
+    for (let i = 0; i < 5; i++) {
+      const completed = deferred<{ reason: string; failed?: boolean; fault?: boolean }>()
+      await manager.start(request, {
+        start: async () => ({ value: null, completed: completed.promise }),
+        stop: async () => {},
+      })
+      completed.resolve({ reason: 'child-exit:0', failed: true, fault: false })
+      await vi.waitFor(() => expect(manager.list().at(-1)!.phase).toBe('failed'))
+    }
+    expect(manager.admission.blocks('resume')).toEqual([])
+    expect(() => manager.admission.assertAllowed('resume')).not.toThrow()
+  })
+
+  it('still installs the fault block for three genuine failures', async () => {
+    const { manager } = await setup()
+    for (let i = 0; i < 3; i++) {
+      const completed = deferred<{ reason: string; failed?: boolean }>()
+      await manager.start(request, {
+        start: async () => ({ value: null, completed: completed.promise }),
+        stop: async () => {},
+      })
+      completed.resolve({ reason: 'child-exit:1', failed: true })
+      await vi.waitFor(() => expect(manager.list().at(-1)!.phase).toBe('failed'))
+    }
+    expect(manager.admission.blocks('resume').map(block => block.kind)).toEqual(['execution-fault'])
+  })
+
   it('records owner restart without inventing a new launch or changing its origin', async () => {
     const { manager, file } = await setup()
     await manager.start(request, { start: async () => ({ value: 1, completed: new Promise(() => {}) }), stop: async () => {} })

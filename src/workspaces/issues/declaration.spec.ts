@@ -12,6 +12,7 @@ import {
   isFireable,
   readWorkspaceIssues,
 } from './declaration.js'
+import type { WatchSpec } from '../watch/types.js'
 
 let dir: string
 beforeEach(async () => {
@@ -35,6 +36,17 @@ async function writeLegacyDecl(content: string): Promise<void> {
 
 const fm = (front: string, body = ''): string => `---\n${front}\n---\n${body}`
 
+/** Minimal valid watcher. Only its PRESENCE matters for timeout selection. */
+const WATCH_SPEC: WatchSpec = {
+  pair: 'BTC-USDT',
+  assetClass: 'crypto',
+  direction: 'LONG',
+  timeframe: '1h',
+  rules: [],
+  invalidationRules: [],
+  managementRules: [],
+}
+
 describe('issueRunTimeoutMs', () => {
   it('honors a declared watchdog', () => {
     expect(issueRunTimeoutMs({ timeout: '45m' })).toBe(45 * 60_000)
@@ -42,6 +54,22 @@ describe('issueRunTimeoutMs', () => {
 
   it('bounds a connector desk even when the Issue declares no timeout', () => {
     expect(issueRunTimeoutMs({ connectorDesk: 'telegram' })).toBe(30 * 60_000)
+  })
+
+  it('bounds a watcher even when the Issue declares no timeout', () => {
+    // A watcher run that never exits makes the watch loop skip that pair
+    // forever: every later fire parks and the owner never hears back. The
+    // default ceiling is what stops a single hung CLI from wedging the desk
+    // for days, which is exactly what happened before this existed.
+    expect(issueRunTimeoutMs({ watch: WATCH_SPEC })).toBe(30 * 60_000)
+  })
+
+  it('prefers an explicit timeout over the watcher default', () => {
+    expect(issueRunTimeoutMs({ watch: WATCH_SPEC, timeout: '15m' })).toBe(15 * 60_000)
+  })
+
+  it('bounds a watcher on a connector desk once, not twice', () => {
+    expect(issueRunTimeoutMs({ watch: WATCH_SPEC, connectorDesk: 'telegram' })).toBe(30 * 60_000)
   })
 
   it('leaves an ordinary run unbounded', () => {

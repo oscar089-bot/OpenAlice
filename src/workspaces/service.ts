@@ -2037,7 +2037,20 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
             // reviews may proceed and explain this exact run as the blocker.
             releaseStartLease();
           },
-        }), value => ({ reason: value.interruptionReason ?? (value.killed ? 'timeout' : `child-exit:${value.exitCode}`), interrupted: !!value.interruptionReason, failed: headlessTaskStatus(value) !== 'done' }));
+        }), value => ({
+          reason: value.interruptionReason ?? (value.killed ? 'timeout' : `child-exit:${value.exitCode}`),
+          interrupted: !!value.interruptionReason,
+          failed: headlessTaskStatus(value) !== 'done',
+          // Only genuine process evidence counts as an execution fault.
+          //
+          // `headlessTaskStatus` also returns 'failed' when a turn merely ENDS
+          // on an error block, even with exit code 0 — which is how a watcher
+          // desk recorded three `child-exit:0` "failures" and installed a
+          // permanent admission block that silenced it for days. A clean exit,
+          // a watchdog ceiling, and an explicit interruption are all excluded;
+          // the task still displays as failed, it just cannot wedge the desk.
+          fault: !value.interruptionReason && !value.killed && value.exitCode !== 0,
+        }));
       } finally {
         activityLease.release();
         if (opts.taskId) runningHeadlessChildren.delete(opts.taskId);
@@ -2553,6 +2566,25 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
       return latest?.taskId === runId && (latest.status === 'failed' || latest.status === 'interrupted');
     },
     isIssueRunning: (workspaceId, issueId) => headlessTasks.list({ issue: { workspaceId, issueId } }).some((run) => run.status === 'running'),
+    // Free any run whose exit never reported. Without this a single wedged
+    // process keeps `isIssueRunning` true forever: every later fire parks and
+    // the owner sees one alert followed by silence for days.
+    reapStaleRuns: async () => {
+      const reaped = await headlessTasks.reapStale();
+      if (reaped.length === 0) return reaped;
+      const resumeIds = [...new Set(reaped.map((task) => task.resumeId))];
+      await executionManager
+        .reapUnconfirmed(resumeIds, 'watchdog-unconfirmed')
+        .catch((err) => launcherLogger.warn('schedule.reap_release_failed', { err }));
+      for (const resumeId of resumeIds) {
+        activeResumeIds.delete(resumeId);
+        executionManager.takeovers.cancel(resumeId);
+      }
+      launcherLogger.warn('schedule.stale_runs_reaped', {
+        tasks: reaped.map((task) => ({ taskId: task.taskId, resumeId: task.resumeId, timeoutMs: task.timeoutMs })),
+      });
+      return reaped;
+    },
     registry,
     resolveResumeWorkspace: (resumeId) => {
       const identity = resumeRegistry.get(resumeId);

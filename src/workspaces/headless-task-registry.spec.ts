@@ -311,3 +311,58 @@ describe('HeadlessTaskRegistry', () => {
     expect(reg.latestForResumeId(first.resumeId)?.taskId).toBe(second.taskId)
   })
 })
+
+describe('HeadlessTaskRegistry.reapStale', () => {
+  const BUDGET = 30 * 60_000
+  const GRACE = 60_000
+
+  it('interrupts a run whose armed budget plus grace has elapsed', async () => {
+    const reg = await HeadlessTaskRegistry.load(path, noopLogger)
+    const task = await createTask(reg, {
+      wsId: 'w1', agent: 'pi', prompt: 'watch', startedAt: 1_000, timeoutMs: BUDGET,
+    })
+    expect(reg.runningCount()).toBe(1)
+
+    // One millisecond short of budget+grace: still inside its window.
+    expect(await reg.reapStale(1_000 + BUDGET + GRACE - 1)).toEqual([])
+    expect(reg.runningCount()).toBe(1)
+
+    const reaped = await reg.reapStale(1_000 + BUDGET + GRACE)
+    expect(reaped.map((row) => row.taskId)).toEqual([task.taskId])
+    expect(reg.runningCount()).toBe(0)
+    expect(reg.get(task.taskId)).toMatchObject({
+      status: 'interrupted',
+      interruptionReason: 'watchdog-unconfirmed',
+    })
+  })
+
+  it('never touches an unbounded run', async () => {
+    const reg = await HeadlessTaskRegistry.load(path, noopLogger)
+    // No timeoutMs: an ordinary Issue run with no declared budget.
+    await createTask(reg, { wsId: 'w1', agent: 'codex', prompt: 'research', startedAt: 1 })
+    expect(await reg.reapStale(1_000_000_000)).toEqual([])
+    expect(reg.runningCount()).toBe(1)
+  })
+
+  it('never touches a run explicitly recorded as unlimited', async () => {
+    const reg = await HeadlessTaskRegistry.load(path, noopLogger)
+    await createTask(reg, {
+      wsId: 'w1', agent: 'codex', prompt: 'scheduled', startedAt: 1,
+      trigger: { kind: 'issue', workspaceId: 'w1', issueId: 'research' },
+    })
+    // An Issue trigger with no timeoutMs persists `timeoutMs: null`.
+    expect(reg.list()[0]?.timeoutMs).toBeNull()
+    expect(await reg.reapStale(1_000_000_000)).toEqual([])
+    expect(reg.runningCount()).toBe(1)
+  })
+
+  it('leaves terminal runs alone', async () => {
+    const reg = await HeadlessTaskRegistry.load(path, noopLogger)
+    const task = await createTask(reg, {
+      wsId: 'w1', agent: 'pi', prompt: 'done', startedAt: 1, timeoutMs: BUDGET,
+    })
+    await reg.complete(task.taskId, { status: 'done', finishedAt: 2 })
+    expect(await reg.reapStale(1_000_000_000)).toEqual([])
+    expect(reg.get(task.taskId)?.status).toBe('done')
+  })
+})
