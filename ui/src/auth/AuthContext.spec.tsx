@@ -17,6 +17,7 @@ vi.mock('./api', () => ({
 import {
   AuthProvider,
   BACKEND_HEALTH_POLL_MS,
+  BACKEND_OUTAGE_FAILURE_THRESHOLD,
   useAuth,
   useBackendRecoverySignal,
 } from './AuthContext'
@@ -91,10 +92,7 @@ describe('AuthProvider backend recovery', () => {
     )
     await flushEffects()
 
-    const recoveryDialog = screen.getByRole('alertdialog')
-    expect(recoveryDialog).toBeTruthy()
-    expect(recoveryDialog).toBe(document.activeElement)
-    expect(screen.getByRole('button', { name: 'Retry now' })).toBeTruthy()
+    expect(screen.queryByRole('alertdialog')).toBeNull()
     expect(screen.queryByText('workspace-app')).toBeNull()
     expect(document.querySelector('input[type="password"]')).toBeNull()
 
@@ -111,6 +109,8 @@ describe('AuthProvider backend recovery', () => {
     mocks.getStatus
       .mockResolvedValueOnce({ authed: true, tokenConfigured: true })
       .mockRejectedValueOnce(new Error('backend restarting'))
+      .mockRejectedValueOnce(new Error('backend restarting'))
+      .mockRejectedValueOnce(new Error('backend restarting'))
       .mockResolvedValueOnce({ authed: true, tokenConfigured: true })
 
     render(
@@ -125,22 +125,35 @@ describe('AuthProvider backend recovery', () => {
     await flushEffects()
 
     expect(screen.getByText('workspace-app')).toBeTruthy()
-    expect(screen.getByRole('alertdialog')).toBeTruthy()
-    expect(screen.getByText('workspace-app').closest('[inert]')).toBeTruthy()
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(screen.getByText('workspace-app').closest('[inert]')).toBeNull()
     expect(document.querySelector('input[type="password"]')).toBeNull()
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(250)
     })
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500)
+    })
+    expect(screen.getByRole('alertdialog')).toBeTruthy()
+    expect(screen.getByText('workspace-app').closest('[inert]')).toBeTruthy()
 
     expect(screen.getByText('workspace-app')).toBeTruthy()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000)
+    })
     expect(screen.queryByRole('status')).toBeNull()
     expect(screen.getByTestId('backend-recovery-generation').textContent).toBe('1')
   })
 
   it('keeps the active upgrade dialog visible during its planned backend restart', async () => {
+    vi.useFakeTimers()
     mocks.getStatus
       .mockResolvedValueOnce({ authed: true, tokenConfigured: true })
+      .mockRejectedValueOnce(new Error('backend restarting'))
+      .mockRejectedValueOnce(new Error('backend restarting'))
       .mockRejectedValueOnce(new Error('backend restarting'))
 
     render(
@@ -158,6 +171,10 @@ describe('AuthProvider backend recovery', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Finish update' }))
     await flushEffects()
+    await act(async () => { await vi.advanceTimersByTimeAsync(250) })
+    await flushEffects()
+    await act(async () => { await vi.advanceTimersByTimeAsync(500) })
+    await flushEffects()
     expect(screen.getByRole('alertdialog')).toBeTruthy()
   })
 
@@ -165,6 +182,8 @@ describe('AuthProvider backend recovery', () => {
     vi.useFakeTimers()
     mocks.getStatus
       .mockResolvedValueOnce({ authed: true, tokenConfigured: true })
+      .mockRejectedValueOnce(new Error('backend restarting'))
+      .mockRejectedValueOnce(new Error('backend restarting'))
       .mockRejectedValueOnce(new Error('backend restarting'))
       .mockResolvedValueOnce({ authed: true, tokenConfigured: true })
       .mockResolvedValueOnce({ authed: true, tokenConfigured: true })
@@ -184,6 +203,13 @@ describe('AuthProvider backend recovery', () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(250)
     })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500)
+    })
+    expect(screen.getByRole('alertdialog')).toBeTruthy()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000)
+    })
     expect(screen.getByTestId('backend-recovery-generation').textContent).toBe('1')
 
     fireEvent.click(screen.getByRole('button', { name: 'Refresh auth' }))
@@ -195,6 +221,8 @@ describe('AuthProvider backend recovery', () => {
     vi.useFakeTimers()
     mocks.getStatus
       .mockResolvedValueOnce({ authed: true, tokenConfigured: true })
+      .mockRejectedValueOnce(new Error('backend stopped'))
+      .mockRejectedValueOnce(new Error('backend stopped'))
       .mockRejectedValueOnce(new Error('backend stopped'))
       .mockResolvedValueOnce({ authed: true, tokenConfigured: true })
 
@@ -208,22 +236,49 @@ describe('AuthProvider backend recovery', () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(BACKEND_HEALTH_POLL_MS)
     })
-
-    expect(screen.getByRole('alertdialog')).toBeTruthy()
-    expect(mocks.getStatus).toHaveBeenCalledTimes(2)
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(250)
-    })
+    await flushEffects()
 
     expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(mocks.getStatus).toHaveBeenCalledTimes(2)
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(250) })
+    await flushEffects()
+    await act(async () => { await vi.advanceTimersByTimeAsync(500) })
+    await flushEffects()
+    expect(screen.getByRole('alertdialog')).toBeTruthy()
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000)
+    })
+    expect(screen.queryByRole('alertdialog')).toBeNull()
     expect(screen.getByText('workspace-app')).toBeTruthy()
+  })
+
+  it('does not declare an outage on one transient probe failure', async () => {
+    vi.useFakeTimers()
+    mocks.getStatus
+      .mockResolvedValueOnce({ authed: true, tokenConfigured: true })
+      .mockRejectedValueOnce(new Error('transient'))
+      .mockResolvedValueOnce({ authed: true, tokenConfigured: true })
+
+    render(
+      <AuthProvider>
+        <AuthGate><WorkspaceHarness /></AuthGate>
+      </AuthProvider>,
+    )
+    await flushEffects()
+    await act(async () => { await vi.advanceTimersByTimeAsync(BACKEND_HEALTH_POLL_MS) })
+    expect(screen.getByText('workspace-app')).toBeTruthy()
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(BACKEND_OUTAGE_FAILURE_THRESHOLD).toBeGreaterThan(1)
   })
 
   it('debounces simultaneous page failures into one independent core probe', async () => {
     vi.useFakeTimers()
     mocks.getStatus
       .mockResolvedValueOnce({ authed: true, tokenConfigured: true })
+      .mockRejectedValueOnce(new Error('backend stopped'))
+      .mockRejectedValueOnce(new Error('backend stopped'))
       .mockRejectedValueOnce(new Error('backend stopped'))
 
     render(
@@ -242,6 +297,12 @@ describe('AuthProvider backend recovery', () => {
     })
 
     expect(mocks.getStatus).toHaveBeenCalledTimes(2)
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    await act(async () => { await vi.advanceTimersByTimeAsync(250) })
+    await flushEffects()
+    await act(async () => { await vi.advanceTimersByTimeAsync(500) })
+    await flushEffects()
+    expect(mocks.getStatus).toHaveBeenCalledTimes(4)
     expect(screen.getByRole('alertdialog')).toBeTruthy()
   })
 

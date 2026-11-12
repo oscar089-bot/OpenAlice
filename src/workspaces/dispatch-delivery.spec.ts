@@ -20,6 +20,15 @@ async function task(external = true) {
     }),
   })
 }
+async function watcherTask() {
+  return tasks.create({ wsId: 'execution', resumeId: 'resume-watch', agent: 'codex', prompt: 'watch', startedAt: 1,
+    communication: buildDispatchCommunication({
+      target: { workspaceId: 'execution', resumeId: 'resume-watch', agent: 'codex' },
+      trigger: { kind: 'issue', workspaceId: 'issue', issueId: 'watch', metadata: { kind: 'watch', conditionKey: 'hit', eventType: 'TRIGGER_HIT' } },
+      activityDelivery: { connectorId: 'telegram' },
+    }),
+  })
+}
 const snapshot = { updatedAt: 1, assistantText: 'checking', blocks: [{ type: 'text' as const, text: 'checking' }, { type: 'tool' as const, id: 't', name: 'read', status: 'running' as const }], metrics: { textBlocks: 1, toolCalls: 1, toolFailures: 0 } }
 function setup() {
   const sendOwnerMessage = vi.fn(async (_message: OwnerChatMessage, _signal?: AbortSignal) => ({ accepted: true as const, deliveryId: 'ok' }))
@@ -31,13 +40,13 @@ it('uses one immutable destination and task identity from acceptance through fin
   await delivery.accepted(run); await delivery.offer(run, snapshot)
   await tasks.complete(run.taskId, { status: 'done' }); await delivery.finish(run, 'done')
   expect(sendOwnerMessage.mock.calls.map(call => call[0])).toEqual([
-    expect.objectContaining({ phase: 'accepted', conversationId: run.taskId, activityLeaseMs: 60000 }),
+    expect.objectContaining({ phase: 'accepted', conversationId: run.taskId, activityLeaseMs: 60000, activity: { backgroundTask: true, toolCalls: 0, toolFailures: 0 } }),
     // Progress carries structured activity and no prose: the transport renders
     // (and animates) its own ephemeral slot from this.
     expect.objectContaining({
       phase: 'progress',
       conversationId: run.taskId,
-      activity: expect.objectContaining({ toolCalls: 1, currentTool: 'read', recentTools: [{ name: 'read', status: 'running' }] }),
+      activity: expect.objectContaining({ backgroundTask: true, toolCalls: 1, currentTool: 'read', recentTools: [{ name: 'read', status: 'running' }] }),
     }),
     expect.objectContaining({ phase: 'final', text: 'done', conversationId: run.taskId, workspaceId: 'execution', source: 'automation' }),
   ])
@@ -54,6 +63,18 @@ it('never sends activity or completion for a private run', async () => {
   const run = await task(false); const { delivery, sendOwnerMessage } = setup()
   await delivery.accepted(run); await delivery.offer(run, snapshot); await tasks.complete(run.taskId, { status: 'done' }); await delivery.finish(run, 'secret')
   expect(sendOwnerMessage).not.toHaveBeenCalled()
+})
+it('sends watcher liveness without creating a duplicate final delivery', async () => {
+  const run = await watcherTask(); const { delivery, sendOwnerMessage } = setup()
+  await delivery.accepted(run)
+  await delivery.offer(run, snapshot)
+  expect(sendOwnerMessage.mock.calls.map(call => call[0])).toEqual([
+    expect.objectContaining({ phase: 'accepted', activity: expect.objectContaining({ backgroundTask: true }) }),
+    expect.objectContaining({ phase: 'progress', activity: expect.objectContaining({ backgroundTask: true }) }),
+  ])
+  await tasks.complete(run.taskId, { status: 'done' })
+  await delivery.finish(run, 'watch report is delivered through Inbox')
+  expect(sendOwnerMessage).toHaveBeenCalledTimes(2)
 })
 it('recovers an interrupted run after Alice restarts, preserving its saved route', async () => {
   const run = await task(); tasks = await HeadlessTaskRegistry.load(join(home, 'tasks.json'), logger)

@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { InboxNotification } from '@traderalice/connector-protocol'
 import { CommandRegistry } from '../core/adapter.js'
-import { formatInboxNotification } from './shared.js'
+import { formatTelegramInboxMarkdownV2, toTelegramMarkdownV2 } from './telegram-markdown-v2.js'
 import { TelegramConnectorAdapter, withTimeout } from './telegram.js'
 
 const handlers = new Map<string, (ctx: any) => Promise<void>>()
@@ -383,8 +383,8 @@ describe('Telegram rich outbound text', () => {
 
     await adapter.sendOwnerText(markdown)
 
-    expect(sendRichMessage).toHaveBeenCalledWith('99', { markdown })
-    expect(sendMessage).not.toHaveBeenCalled()
+    expect(sendMessage).toHaveBeenCalledWith('99', toTelegramMarkdownV2(markdown), { parse_mode: 'MarkdownV2' })
+    expect(sendRichMessage).not.toHaveBeenCalled()
     await adapter.stop()
   })
 
@@ -417,7 +417,7 @@ describe('Telegram rich outbound text', () => {
     // Narration then replaces that activity in the SAME slot — one message, not
     // a durable fragment per narration chunk.
     expect(sendRichMessageDraft).toHaveBeenLastCalledWith(99, draftId, { markdown: 'Checking the market.' })
-    expect(sendRichMessage).toHaveBeenCalledWith('99', { markdown: 'The market is quiet.' })
+    expect(sendMessage).toHaveBeenCalledWith('99', 'The market is quiet\\.', { parse_mode: 'MarkdownV2' })
     await adapter.stop()
   })
 
@@ -455,7 +455,7 @@ describe('Telegram rich outbound text', () => {
       await adapter.sendOwnerChat({
         id: 'end', adapterId: 'telegram', conversationId: 'turn', phase: 'final', text: 'Done.',
       })
-      expect(sendRichMessage).toHaveBeenCalledWith('99', { markdown: 'Done.' })
+      expect(sendMessage).toHaveBeenCalledWith('99', 'Done\\.', { parse_mode: 'MarkdownV2' })
       // The typed indicator is throttled separately from frames, so it must not
       // be re-sent on every 1.2s animation tick.
       const afterFinal = sendChatAction.mock.calls.length
@@ -617,10 +617,7 @@ describe('Telegram rich outbound text', () => {
 
     await adapter.deliver(notification)
 
-    expect(sendRichMessage).toHaveBeenCalledWith('99', {
-      markdown: formatInboxNotification(notification),
-    })
-    expect(sendMessage).not.toHaveBeenCalled()
+    expect(sendMessage).toHaveBeenCalledWith('99', formatTelegramInboxMarkdownV2(notification), { parse_mode: 'MarkdownV2' })
     expect(sendDocument).not.toHaveBeenCalled()
     await adapter.stop()
   })

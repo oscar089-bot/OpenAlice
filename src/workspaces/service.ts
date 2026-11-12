@@ -1207,6 +1207,15 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
     join(config.launcherRoot, 'state', 'session-executions.json'),
     execution => sessionRegistry.projectExecution(execution),
   );
+  // A headless execution record outlives its process when the exit never
+  // reports: nothing removes it from the manager's `active` map. Takeover
+  // admission used to treat that phantom as a busy owner with no deadline, so
+  // a queued watch/desk dispatch waited for a human to click "Keep using
+  // Session" — the phone desk went silent after a watcher fired. Cross-check
+  // the live task registry instead of trusting the journal record alone.
+  executionManager.takeovers.setHeadlessLiveness(
+    (resumeId) => headlessTasks.list({ status: 'running' }).some((task) => task.resumeId === resumeId),
+  );
   await executionManager.recoverOrphans(sessionRegistry.listAll());
   const probeExecutionRequest = (ws: WorkspaceMeta, adapter: CliAdapter, origin: ExecutionOrigin, runtime?: ResolvedSessionRuntimeBinding, resume?: SessionFactoryContext['resume']): ExecutionRequest => {
     if (resume === 'last') throw new Error('A diagnostic probe must identify its exact Session');
@@ -2223,6 +2232,7 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
       const communication = buildDispatchCommunication({
         target: { workspaceId: ws.id, resumeId: identity.resumeId, agent: adapter.id },
         inquiry, trigger, conversation, desk,
+        ...(trigger?.metadata?.kind === 'watch' ? { activityDelivery: { connectorId: 'telegram' } } : {}),
       });
       rec = await headlessTasks.create({
         communication,
@@ -2537,9 +2547,10 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
         }
         if (!args[1].capabilities.headless || !args[1].composeHeadlessCommand) throw new Error('Runtime does not support background execution');
         const source = trigger?.kind === 'issue' ? trigger : inquiry?.subject.kind === 'issue' ? inquiry.subject : undefined;
+        const watcherPriority = trigger?.kind === 'issue' && trigger.metadata?.kind === 'watch';
         try { release = await executionManager.takeovers.acquire({ workspaceId: ws.id, recordId: record.id, resumeId },
           validateExecutionOrigin({ ...origin, ...(source ? { workspaceId: source.workspaceId, issueId: source.issueId } : {}) }),
-          executionManager.takeovers.idleSeconds); }
+          executionManager.takeovers.idleSeconds, watcherPriority ? { priority: 'watch' } : {}); }
         catch (error) {
           if (error instanceof SessionTakeoverDeclinedError) throw new HeadlessResumeError('takeover_declined', error.message);
           throw error;

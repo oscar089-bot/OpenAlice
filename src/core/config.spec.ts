@@ -39,6 +39,8 @@ import {
   writeUTAsConfig,
   aiProviderSchema,
   resolveCredential,
+  addCredential,
+  nextCredentialApiKey,
   deleteCredential,
   credentialSchema,
   validSections,
@@ -102,6 +104,40 @@ describe('readAIProviderConfig', () => {
     const cfg = await readAIProviderConfig()
     expect('profiles' in cfg).toBe(false)
     expect('activeProfile' in cfg).toBe(false)
+  })
+})
+
+describe('credential key pools', () => {
+  it('selects the persisted key round-robin and advances the cursor', async () => {
+    fileReturns({ credentials: {
+      'custom-1': {
+        vendor: 'custom', authType: 'api-key', apiKey: 'key-a', apiKeys: ['key-a', 'key-b'],
+        keyRotationIndex: 0, wires: { 'openai-chat': 'https://gateway.test/v1' },
+      },
+    } })
+    await expect(nextCredentialApiKey('custom-1', {
+      vendor: 'custom', authType: 'api-key', apiKey: 'fallback', wires: { 'openai-chat': 'https://gateway.test/v1' },
+    })).resolves.toBe('key-a')
+    expect(mockWriteFile).toHaveBeenCalled()
+
+    fileReturns({ credentials: {
+      'custom-1': {
+        vendor: 'custom', authType: 'api-key', apiKey: 'key-a', apiKeys: ['key-a', 'key-b'],
+        keyRotationIndex: 1, wires: { 'openai-chat': 'https://gateway.test/v1' },
+      },
+    } })
+    await expect(nextCredentialApiKey('custom-1', {
+      vendor: 'custom', authType: 'api-key', apiKey: 'fallback', wires: { 'openai-chat': 'https://gateway.test/v1' },
+    })).resolves.toBe('key-b')
+  })
+
+  it('keeps same-key custom credentials separate when their endpoints differ', async () => {
+    fileReturns({ credentials: {} })
+    const first = await addCredential({ vendor: 'custom', authType: 'api-key', apiKey: 'same-key', wires: { 'openai-chat': 'https://one.test/v1' } })
+    fileReturns({ credentials: { 'custom-1': { vendor: 'custom', authType: 'api-key', apiKey: 'same-key', wires: { 'openai-chat': 'https://one.test/v1' } } } })
+    const second = await addCredential({ vendor: 'custom', authType: 'api-key', apiKey: 'same-key', wires: { 'openai-chat': 'https://two.test/v1' } })
+    expect(first).toBe('custom-1')
+    expect(second).toBe('custom-2')
   })
 })
 

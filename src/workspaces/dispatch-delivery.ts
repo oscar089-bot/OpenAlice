@@ -9,8 +9,9 @@ export function dispatchMessage(
   phase: OwnerChatMessage['phase'],
   text?: string,
   activity?: OwnerChatActivity,
+  route = task.communication?.delivery,
 ): OwnerChatMessage | null {
-  const delivery = task.communication?.delivery
+  const delivery = route
   if (!delivery) return null
   return {
     id: `turn-${task.taskId}-${phase}`, adapterId: delivery.connectorId, conversationId: task.taskId, phase,
@@ -40,7 +41,16 @@ export class DispatchDelivery {
   async accepted(task: HeadlessTaskRecord, heartbeat = false): Promise<void> {
     if (task.status !== 'running' || task.terminalDelivery) return
     this.live.add(task.taskId)
-    const message = dispatchMessage(task, 'accepted')
+    const activityDelivery = task.communication?.activityDelivery
+      ? { ...task.communication.activityDelivery, source: 'automation' as const }
+      : task.communication?.delivery
+    const message = dispatchMessage(task, 'accepted', undefined,
+      task.communication?.delivery?.source === 'automation'
+        ? { backgroundTask: true, toolCalls: 0, toolFailures: 0 }
+        : task.communication?.activityDelivery
+          ? { backgroundTask: true, toolCalls: 0, toolFailures: 0 }
+          : undefined,
+      activityDelivery)
     if (!message) return
     if (heartbeat) message.id += `-${Math.floor(Date.now() / 20_000)}`
     try { await this.send(message) } catch (error) {
@@ -62,8 +72,9 @@ export class DispatchDelivery {
    * would appear frozen during a long tool call.
    */
   async offer(task: HeadlessTaskRecord, snapshot: HeadlessTurnProgress): Promise<void> {
-    if (task.status !== 'running' || task.terminalDelivery || !task.communication?.delivery) return
-    const activity = turnActivityFrom(snapshot)
+    if (task.status !== 'running' || task.terminalDelivery || (!task.communication?.delivery && !task.communication?.activityDelivery)) return
+    const activity = turnActivityFrom(snapshot,
+      task.communication?.delivery?.source === 'automation' || !!task.communication?.activityDelivery)
     if (!activity) return
     const fingerprint = JSON.stringify(activity)
     if (this.progress.get(task.taskId)?.has(fingerprint)) return
@@ -71,7 +82,10 @@ export class DispatchDelivery {
     seen.clear()
     seen.add(fingerprint)
     this.progress.set(task.taskId, seen)
-    const message = dispatchMessage(task, 'progress', undefined, activity)!
+    const activityDelivery = task.communication?.activityDelivery
+      ? { ...task.communication.activityDelivery, source: 'automation' as const }
+      : task.communication?.delivery
+    const message = dispatchMessage(task, 'progress', undefined, activity, activityDelivery)!
     message.id = deskProgressMessageId(task.taskId)
     try { await this.send(message) } catch (error) {
       this.warn('dispatch.delivery_progress_failed', { taskId: task.taskId, error: String(error) })
@@ -110,7 +124,7 @@ export class DispatchDelivery {
 
   /** Heartbeats renew activity leases; recovery only closes, never replays bodies. */
   async reconcile(): Promise<void> {
-    const candidates = this.tasks.list().filter(task => task.communication?.delivery
+    const candidates = this.tasks.list().filter(task => (task.communication?.delivery || task.communication?.activityDelivery)
       && (task.status === 'running' || !task.terminalDelivery || ['pending', 'uncertain'].includes(task.terminalDelivery.state)))
     const active = candidates.filter(task => task.status === 'running')
     const recovery = candidates.filter(task => task.status !== 'running')

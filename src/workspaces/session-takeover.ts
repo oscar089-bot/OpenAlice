@@ -17,6 +17,7 @@ export interface SessionTakeover {
   blocker?: 'working' | 'terminal' | 'queued'
   decidedAt?: number
   decision?: 'approved' | 'idle-timeout' | 'rejected' | 'owner-restarted' | 'shutdown' | 'unoccupied'
+  priority?: 'watch'
 }
 export class SessionTakeoverDeclinedError extends Error {
   constructor() { super('Session takeover declined by the user'); this.name = 'SessionTakeoverDeclinedError' }
@@ -32,14 +33,32 @@ const journalSchema = z.object({
     state: z.enum(['pending', 'waiting-idle', 'handoff', 'running', 'completed', 'rejected', 'canceled', 'failed']),
     blocker: z.enum(['working', 'terminal', 'queued']).optional(), decidedAt: z.number().finite().optional(),
     decision: z.enum(['approved', 'idle-timeout', 'rejected', 'owner-restarted', 'shutdown', 'unoccupied']).optional(),
+    priority: z.literal('watch').optional(),
   }).strict()),
 }).strict()
 type Entry = { row: SessionTakeover; approved: boolean; resolve: (release: () => void) => void; reject: (error: Error) => void }
 const pending = (row: SessionTakeover) => ['pending', 'waiting-idle', 'handoff', 'running'].includes(row.state)
 
+/**
+ * Ceiling for a request parked behind an owner that is not an interactive turn.
+ *
+ * A headless/`stopping` execution record can outlive its actual run: a process
+ * that never reports an exit keeps its entry in the manager's `active` map, so
+ * every pass sees a non-`running` owner. That branch used to have no deadline,
+ * so the row — and every request queued behind it — waited for a human to press
+ * "Keep using Session". A phone desk therefore went silent after a watcher
+ * fired: the reply sat at "approved · waiting" until someone clicked. Past this
+ * window the queue head is released with a visible failure, so the FIFO drains
+ * on its own. */
+const QUEUED_OWNER_GRACE_MS = 120_000
+
 /** An internal part of the execution authority, never a second process launcher. */
 export class SessionTakeovers {
   idleSeconds = 60
+  /** How long a request may sit behind a non-running owner before it is failed
+   *  loudly. Public so tests and an operator-facing tuning path can shorten it;
+   *  production keeps the constant default. */
+  queuedOwnerGraceMs = QUEUED_OWNER_GRACE_MS
   private rows: SessionTakeover[] = []
   private entries: Entry[] = []
   private timer?: ReturnType<typeof setInterval>
@@ -47,8 +66,37 @@ export class SessionTakeovers {
   private closed = false
   private writes = Promise.resolve()
   private fault?: Error
+  /** Whether a headless execution is still backed by a running task record.
+   *  Wired after construction: the task registry is created by the service
+   *  layer, which owns this manager rather than the other way round. Defaults
+   *  to trusting the record so a standalone manager behaves as before. */
+  private headlessAlive: (resumeId: string) => boolean = () => true
   private constructor(private readonly file: string, private readonly current: (id: string) => ExecutionRecord | undefined,
     private readonly stop: (id: string, reason: string) => Promise<boolean>, private readonly admit: (id: string) => void = () => {}) {}
+
+  /** Cross-check a headless owner against the live task registry. */
+  setHeadlessLiveness(probe: (resumeId: string) => boolean): void { this.headlessAlive = probe }
+
+  /**
+   * The execution actually owning this Session, if any.
+   *
+   * A headless record whose task is no longer running is a stale journal entry:
+   * the process is gone but nothing removed it from the manager's `active` map.
+   * Reporting it as an owner makes every takeover wait on a phantom, so it is
+   * filtered to `undefined` and the caller behaves as for an unoccupied Session.
+   */
+  private liveOwner(resumeId: string): ExecutionRecord | undefined {
+    const owner = this.current(resumeId)
+    // A probe is a synchronous, bounded readiness check that reuses the real
+    // resumeId; it has no task record of its own, so it must stay a blocker.
+    if (owner?.surface !== 'headless' || owner.intent === 'probe') return owner
+    if (this.headlessAlive(resumeId)) return owner
+    // The task record is already finished, so this execution is over. Allow a
+    // short window for the completion callback to clear the record before
+    // concluding the entry is a phantom: a stop always re-checks liveness, so
+    // calling a just-finished run "gone" would only risk an unneeded kill.
+    return Date.now() - owner.requestedAt > 5_000 ? undefined : owner
+  }
 
   static async open(file: string, current: (id: string) => ExecutionRecord | undefined, stop: (id: string, reason: string) => Promise<boolean>, admit: (id: string) => void = () => {}) {
     const value = new SessionTakeovers(file, current, stop, admit)
@@ -90,12 +138,13 @@ export class SessionTakeovers {
     }
     await this.tick()
   }
-  async acquire(target: { workspaceId: string; recordId: string; resumeId: string }, origin: ExecutionOrigin, idleSeconds: number): Promise<() => void> {
+  async acquire(target: { workspaceId: string; recordId: string; resumeId: string }, origin: ExecutionOrigin, idleSeconds: number, options: { priority?: 'watch' } = {}): Promise<() => void> {
     this.admit(target.resumeId)
     if (this.closed || this.fault) throw new Error('Session takeover admission unavailable')
     if (origin.resumeId === target.resumeId) throw new Error('A Session cannot request its own takeover')
     if (this.entries.length >= 100) throw new Error('Session takeover queue is full')
     const row: SessionTakeover = { ...target, id: randomUUID(), origin: structuredClone(origin), requestedAt: Date.now(), idleSeconds,
+      ...(options.priority ? { priority: options.priority } : {}),
       deadline: Date.now() + idleSeconds * 1000, state: 'pending' }
     const result = new Promise<() => void>((resolve, reject) => { this.entries.push({ row, resolve, reject, approved: false }) })
     // Install a rejection observer before durable admission or shutdown can fail.
@@ -141,10 +190,29 @@ export class SessionTakeovers {
           row.state = 'canceled'; row.decidedAt = Date.now(); e.reject(error as Error)
           this.entries = this.entries.filter(other => other !== e); await this.persist(); continue
         }
-        const owner = this.current(row.resumeId)
-        if (owner?.surface === 'headless' || (owner && owner.phase !== 'running')) { row.blocker = 'queued'; continue }
-        if (owner && !e.approved && Date.now() < row.deadline) { row.state = 'pending'; row.blocker = owner.surface === 'terminal' ? 'terminal' : owner.activity !== 'idle' ? 'working' : undefined; continue }
-        if (owner && (owner.surface === 'terminal' ? !e.approved : owner.activity !== 'idle')) {
+        const owner = this.liveOwner(row.resumeId)
+        if (owner && owner.phase !== 'running') {
+          // A record that is not `running` is not doing work — typically a stop
+          // whose process exit never confirmed. Nothing will ever finish it, so
+          // an unbounded wait here wedges every later request (and the phone
+          // desk behind them) until a human clicks "Keep using Session". Wait a
+          // bounded window, then fail loudly so the FIFO drains on its own.
+          // This must run BEFORE the headless branch: a `stopping` headless
+          // record is a zombie, not a live background run.
+          if (Date.now() - row.requestedAt < this.queuedOwnerGraceMs) { row.blocker = 'queued'; continue }
+          row.state = 'failed'; row.decidedAt = Date.now(); row.blocker = undefined
+          this.entries = this.entries.filter(other => other !== e)
+          e.reject(new Error('The background owner did not release this Session within the queue window'))
+          await this.persist(); continue
+        }
+        if (owner?.surface === 'headless') {
+          // A genuinely live background run keeps the queue head waiting, as it
+          // always has: the waiter releases it when the run finishes.
+          row.blocker = 'queued'; continue
+        }
+        const watchPriority = row.priority === 'watch'
+        if (owner && !watchPriority && !e.approved && Date.now() < row.deadline) { row.state = 'pending'; row.blocker = owner.surface === 'terminal' ? 'terminal' : owner.activity !== 'idle' ? 'working' : undefined; continue }
+        if (owner && !watchPriority && (owner.surface === 'terminal' ? !e.approved : owner.activity !== 'idle')) {
           row.state = 'waiting-idle'; row.blocker = owner.surface === 'terminal' ? 'terminal' : 'working'; continue
         }
         // This synchronous state change closes input admission before any await.
@@ -168,9 +236,10 @@ export class SessionTakeovers {
       this.admit(row.resumeId)
       // The journal write yields. A GUI turn may have started while the handoff
       // was being recorded, so inspect the live owner once more before stopping it.
-      const owner = this.current(row.resumeId)
+      const owner = this.liveOwner(row.resumeId)
+      const watchPriority = row.priority === 'watch'
       if (owner && (owner.executionId !== ownerExecutionId || owner.phase !== 'running'
-        || owner.surface === 'headless' || (owner.surface === 'terminal' ? !e.approved : owner.activity !== 'idle'))) {
+        || owner.surface === 'headless' || (!watchPriority && (owner.surface === 'terminal' ? !e.approved : owner.activity !== 'idle')))) {
         row.state = 'waiting-idle'
         row.blocker = owner.executionId !== ownerExecutionId || owner.surface === 'headless' || owner.phase !== 'running'
           ? 'queued' : owner.surface === 'terminal' ? 'terminal' : 'working'

@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
-import { SessionExecutionManager, type ExecutionRequest } from './session-execution-manager.js'
+import { SessionExecutionManager, type ExecutionRecord, type ExecutionRequest } from './session-execution-manager.js'
 import { SessionTakeovers } from './session-takeover.js'
 const roots: string[] = []
 const managers: SessionExecutionManager[] = []
@@ -48,6 +48,15 @@ it('explicit approval also waits for a GUI turn to finish', async () => {
   await manager.takeovers.decide(manager.takeovers.list()[0].id, 'approve')
   expect(stop).not.toHaveBeenCalled()
   await report('idle'); const release = await pending; release()
+})
+it('watch priority hands off a busy interactive owner without a decision', async () => {
+  const { manager, report, stop } = await setup()
+  await report('working')
+  const pending = manager.takeovers.acquire(target, origin, 60, { priority: 'watch' })
+  const release = await pending
+  expect(stop).toHaveBeenCalledTimes(1)
+  expect(manager.takeovers.list()[0]).toMatchObject({ state: 'running', priority: 'watch' })
+  release()
 })
 it('rechecks activity after journaling before stopping an owner', async () => {
   const { manager, file } = await setup()
@@ -98,6 +107,62 @@ it('decline leaves the owner running; restart cancels requests instead of silent
   expect(recovered.list()[1]).toMatchObject({ state: 'canceled', decision: 'owner-restarted' })
   await recovered.close()
 })
+const headlessOwner = (overrides: Partial<ExecutionRecord> = {}): ExecutionRecord => ({
+  workspaceId: 'ws', resumeId: 'resume', recordId: 'record', agent: 'pi', surface: 'headless',
+  intent: 'resume', origin: { kind: 'issue', entry: 'schedule' },
+  configuration: { credentialSource: 'native' },
+  executionId: 'exec-headless', phase: 'running', requestedAt: Date.now(), events: [],
+  ...overrides,
+})
+
+it('does not queue behind a headless record whose run has already ended', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'takeover-')); roots.push(root)
+  const stop = vi.fn(async () => false)
+  // Old record + no live task: the execution journal entry is a phantom left in
+  // the manager's active map. Queueing behind it used to wedge the phone desk
+  // until a human rejected the request.
+  const phantom = headlessOwner({ requestedAt: Date.now() - 10 * 60_000 })
+  const takeovers = await SessionTakeovers.open(join(root, 'stale.json'), () => phantom, stop)
+  takeovers.setHeadlessLiveness(() => false)
+  const release = await takeovers.acquire(target, origin, 0)
+  expect(takeovers.list()[0]).toMatchObject({ state: 'running', decision: 'unoccupied' })
+  expect(stop).not.toHaveBeenCalled()
+  release()
+  await takeovers.close()
+})
+
+it('keeps watcher priority queued behind a live headless run', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'takeover-')); roots.push(root)
+  const stop = vi.fn(async () => false)
+  const owner = headlessOwner()
+  const takeovers = await SessionTakeovers.open(join(root, 'watch.json'), () => owner, stop)
+  takeovers.setHeadlessLiveness(() => true)
+  const pending = takeovers.acquire(target, origin, 0, { priority: 'watch' })
+  void pending.catch(() => {})
+  await vi.waitFor(() => expect(takeovers.list()[0]).toMatchObject({ blocker: 'queued', priority: 'watch' }))
+  await takeovers.close()
+  await expect(pending).rejects.toThrow('shutting down')
+  expect(stop).not.toHaveBeenCalled()
+})
+
+it('fails a queue head parked behind a non-running owner instead of waiting forever', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'takeover-')); roots.push(root)
+  const stop = vi.fn(async () => false)
+  // A `stopping` record whose exit never confirmed: nothing will ever finish
+  // it, so an unbounded wait here wedges every later request.
+  const zombie = headlessOwner({ phase: 'stopping', requestedAt: Date.now() - 10 * 60_000 })
+  const takeovers = await SessionTakeovers.open(join(root, 'live.json'), () => zombie, stop)
+  takeovers.setHeadlessLiveness(() => true)
+  // Real timers: `tick()` persists through fs, so fake timers would deadlock.
+  takeovers.queuedOwnerGraceMs = 50
+  const pending = takeovers.acquire(target, origin, 0)
+  const rejected = expect(pending).rejects.toThrow('did not release')
+  await rejected
+  expect(takeovers.list()[0]?.state).toBe('failed')
+  expect(stop).not.toHaveBeenCalled()
+  await takeovers.close()
+})
+
 it('validates timing and prevents self takeover', async () => {
   const { manager } = await setup()
   await expect(manager.takeovers.configure(0)).rejects.toThrow('10–3600')

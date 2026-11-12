@@ -157,6 +157,23 @@ Later requests queue; interactive starts and prompts cannot race the handoff.
 Different Sessions remain independent. Shutdown cancels waiting admissions before
 stopping managed processes. Failed persistence closes admission.
 
+A queue head is never allowed to wait forever. A headless execution record can
+outlive its process when the exit never reports, and a `stopping` record can
+never finish at all; either one used to hold the FIFO — and the phone desk
+behind it — until a human pressed "Keep using Session". The manager therefore
+cross-checks a headless owner against the live headless task registry (a record
+with no running task is a stale journal entry, not an owner) and bounds a head
+parked behind a non-`running` owner. Past that window the head fails with a
+visible error so later requests proceed on their own. A genuinely running
+background owner still blocks its queue exactly as before.
+
+Deterministic market-watcher dispatches use a separate priority admission. They
+do not open the human takeover prompt: an interactive owner is handed off
+automatically, while a genuinely running headless owner or an earlier request
+for the same Session still serializes later watcher work. Ordinary Issue,
+schedule, connector, and user dispatches retain the approval-based takeover
+policy.
+
 `GET /api/workspaces/session-takeovers` projects requests and server time;
 `POST /api/workspaces/session-takeovers/:requestId/decision` accepts approve or
 reject; `PUT /api/workspaces/session-takeovers/settings` sets `idleSeconds`.

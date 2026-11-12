@@ -42,7 +42,48 @@ export function toTelegramMarkdownV2(source: string): string {
 
 function convertMarkdownSection(section: string): string {
   if (!section) return section
-  return section.split('\n').map(convertMarkdownLine).join('\n')
+  const lines = section.split('\n')
+  const output: string[] = []
+  for (let index = 0; index < lines.length; index += 1) {
+    const tableEnd = markdownTableEnd(lines, index)
+    if (tableEnd !== null) {
+      output.push(renderMarkdownTable(lines.slice(index, tableEnd)))
+      index = tableEnd - 1
+      continue
+    }
+    output.push(convertMarkdownLine(lines[index] ?? ''))
+  }
+  return output.join('\n')
+}
+
+function markdownTableEnd(lines: readonly string[], start: number): number | null {
+  if (start + 1 >= lines.length || !isTableRow(lines[start] ?? '') || !isTableSeparator(lines[start + 1] ?? '')) return null
+  let end = start + 2
+  while (end < lines.length && isTableRow(lines[end] ?? '')) end += 1
+  return end
+}
+
+function isTableRow(line: string): boolean {
+  return line.includes('|') && line.trim().length > 0
+}
+
+function isTableSeparator(line: string): boolean {
+  const cells = tableCells(line)
+  return cells.length >= 2 && cells.every((cell) => /^:?-{3,}:?$/.test(cell.trim()))
+}
+
+function tableCells(line: string): string[] {
+  const trimmed = line.trim().replace(/^\|/, '').replace(/\|$/, '')
+  return trimmed.split('|').map((cell) => cell.trim())
+}
+
+function renderMarkdownTable(lines: readonly string[]): string {
+  const rows = lines.filter((line) => !isTableSeparator(line)).map(tableCells)
+  const width = Math.max(...rows.map((row) => row.length))
+  const normalized = rows.map((row) => Array.from({ length: width }, (_, index) => row[index] ?? ''))
+  const widths = Array.from({ length: width }, (_, index) => Math.max(...normalized.map((row) => row[index]?.length ?? 0)))
+  const body = normalized.map((row) => row.map((cell, index) => cell.padEnd(widths[index] ?? cell.length)).join(' | '))
+  return `\`\`\`\n${body.join('\n')}\n\`\`\``
 }
 
 function convertMarkdownLine(line: string): string {

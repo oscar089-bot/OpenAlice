@@ -38,6 +38,19 @@ describe('Telegram MarkdownV2 conversion', () => {
     ].join('\n'))
   })
 
+  it('renders GFM tables as aligned code blocks', () => {
+    expect(toTelegramMarkdownV2([
+      '| Asset | Bias |',
+      '| --- | --- |',
+      '| BTC | Bullish |',
+    ].join('\n'))).toBe([
+      '```',
+      'Asset | Bias   ',
+      'BTC   | Bullish',
+      '```',
+    ].join('\n'))
+  })
+
   it('keeps unmatched markers literal instead of emitting broken entities', () => {
     expect(toTelegramMarkdownV2('price is 3*2=6.')).toBe('price is 3\\*2\\=6\\.')
   })

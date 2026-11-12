@@ -29,6 +29,14 @@ describe('dispatch communication authority', () => {
     expect(buildDispatchCommunication({ target, trigger, desk }).delivery?.source).toBe('automation')
     expect(buildDispatchCommunication({ target, trigger }).delivery).toBeUndefined()
   })
+  it('can route watcher activity without routing its final report', () => {
+    const trigger = { kind: 'issue' as const, workspaceId: 'issue-ws', issueId: 'watch', metadata: { kind: 'watch' as const, conditionKey: 'hit', eventType: 'TRIGGER_HIT' } }
+    expect(buildDispatchCommunication({ target, trigger, activityDelivery: { connectorId: 'telegram' } })).toMatchObject({
+      reply: { kind: 'issue-run' },
+      activityDelivery: { connectorId: 'telegram', contentWorkspaceId: target.workspaceId },
+    })
+    expect(buildDispatchCommunication({ target, trigger, activityDelivery: { connectorId: 'telegram' } }).delivery).toBeUndefined()
+  })
   it('does not guess a destination for unassociated headless work', () => {
     expect(buildDispatchCommunication({ target, desk })).toEqual({ version: 1, origin: { kind: 'unknown' }, target, reply: { kind: 'none' } })
   })

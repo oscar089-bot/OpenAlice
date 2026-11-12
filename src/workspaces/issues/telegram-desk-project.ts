@@ -67,6 +67,7 @@ function latestNarration(blocks: HeadlessTurnProgress['blocks']): string | undef
  */
 export function turnActivityFrom(
   progress: HeadlessTurnProgress,
+  backgroundTask = false,
 ): OwnerChatActivity | undefined {
   const { metrics, blocks } = progress
   const narration = latestNarration(blocks)
@@ -100,6 +101,7 @@ export function turnActivityFrom(
   const unresolvedFailures = visibleTools.filter((tool) => tool.status === 'failed').length
 
   return {
+    ...(backgroundTask ? { backgroundTask: true } : {}),
     toolCalls: metrics.toolCalls,
     toolFailures: unresolvedFailures,
     ...(currentTool ? { currentTool } : {}),

@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 
 import { isModelReasoningEffort } from '@/ai-providers/model-semantics.js'
 import type { Credential } from '@/core/config.js'
-import { readCredentials } from '@/core/config.js'
+import { nextCredentialApiKey, readCredentials } from '@/core/config.js'
 
 import type {
   CliAdapter,
@@ -136,7 +136,7 @@ function credentialFor(
   return credential
 }
 
-function resolveVault(
+async function resolveVault(
   adapter: CliAdapter,
   credentials: Readonly<Record<string, Credential>>,
   credentialSlug: string,
@@ -145,10 +145,12 @@ function resolveVault(
     readonly model?: string
     readonly reasoningEffort?: SessionRuntimeBinding['reasoningEffort']
   },
-): ResolvedSessionRuntimeBinding {
+): Promise<ResolvedSessionRuntimeBinding> {
   const credential = credentialFor(credentials, credentialSlug)
+  const apiKey = await nextCredentialApiKey(credentialSlug, credential)
+  const selectedCredential = apiKey ? { ...credential, apiKey } : credential
   const selectedModel = input.model ?? resolveInjectionModel(credential) ?? undefined
-  const ai = credentialToWorkspaceAiCred(credential, adapter, {
+  const ai = credentialToWorkspaceAiCred(selectedCredential, adapter, {
     ...(input.requestedWireShape ? { wireShape: input.requestedWireShape } : {}),
     ...(selectedModel ? { model: selectedModel } : {}),
     ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
@@ -221,7 +223,7 @@ export async function resolveSessionRuntimeBinding(input: {
   assertedAgentContract(input.adapter)
   const credential = input.binding.credential
   if (credential.source === 'vault') {
-    const resolved = resolveVault(
+    const resolved = await resolveVault(
       input.adapter,
       input.credentials ?? await readCredentials(),
       credential.credentialSlug,

@@ -122,6 +122,12 @@ describe('renderTurnActivity', () => {
     expect(renderTurnActivityRich(base, 0)).toBe(`${brailleSpinner(0)} \uD83E\uDDE0 Thinking\u2026`)
   })
 
+  it('labels automated activity separately from an interactive turn', () => {
+    const activity = { ...base, backgroundTask: true }
+    expect(renderTurnActivity(activity, 0)).toContain('Background task · Thinking…')
+    expect(renderTurnActivityRich(activity, 0)).toContain('Background task · Thinking…')
+  })
+
   // The whole point of the reshape: a turn that ran nineteen tools collapses to
   // one header line plus one line per FAILURE, instead of a line per tool.
   it('collapses a many-tool turn to a header and only the failures', () => {

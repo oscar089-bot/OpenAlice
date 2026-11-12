@@ -7,8 +7,9 @@ export interface TakeoverRequest {
   state: 'pending' | 'waiting-idle' | 'handoff' | 'running' | 'completed' | 'rejected' | 'canceled' | 'failed'
   blocker?: 'working' | 'terminal' | 'queued'
   decision?: string
+  priority?: 'watch'
 }
-export const awaitingTakeover = (row: TakeoverRequest) => row.state === 'pending' || row.state === 'waiting-idle'
+export const awaitingTakeover = (row: TakeoverRequest) => row.priority !== 'watch' && (row.state === 'pending' || row.state === 'waiting-idle')
 async function request<T>(path = '', init?: RequestInit): Promise<T> {
   const response = await fetch(`/api/workspaces/session-takeovers${path}`, init)
   if (!response.ok) throw new Error((await response.json().catch(() => null))?.message ?? `Request failed (${response.status})`)

@@ -137,6 +137,8 @@ export function createConfigRoutes(opts?: ConfigRouteOpts) {
         wires: credentialWires(cred), // derives from legacy {baseUrl,wireShape} too
         ...(cred.baseUrl ? { baseUrl: cred.baseUrl } : {}),
         apiKey: cred.apiKey ?? null,
+        apiKeys: cred.apiKeys ?? (cred.apiKey ? [cred.apiKey] : []),
+        apiKeyCount: cred.apiKeys?.length ?? (cred.apiKey ? 1 : 0),
         hasApiKey: !!cred.apiKey,
         ...(cred.lastModel ? { lastModel: cred.lastModel } : {}),
       }))
@@ -186,9 +188,11 @@ export function createConfigRoutes(opts?: ConfigRouteOpts) {
   /** POST /credentials — add an api-key credential (deduped by key). Returns slug. */
   app.post('/credentials', async (c) => {
     try {
-      const body = await c.req.json<{ vendor?: string; label?: string; wires?: unknown; baseUrl?: string; apiKey?: string; lastModel?: string }>()
+      const body = await c.req.json<{ vendor?: string; label?: string; wires?: unknown; baseUrl?: string; apiKey?: string; apiKeys?: unknown; lastModel?: string }>()
       const apiKey = body.apiKey?.trim()
-      if (!apiKey) return c.json({ error: 'apiKey is required' }, 400)
+      const apiKeys = Array.isArray(body.apiKeys) ? body.apiKeys.filter((key): key is string => typeof key === 'string').map((key) => key.trim()).filter(Boolean) : []
+      const pool = [...new Set([apiKey, ...apiKeys].filter((key): key is string => !!key))]
+      if (pool.length === 0) return c.json({ error: 'apiKey is required' }, 400)
       const vendorParse = credentialVendorEnum.safeParse(body.vendor)
       const label = body.label?.trim()
       const lastModel = body.lastModel?.trim()
@@ -198,7 +202,8 @@ export function createConfigRoutes(opts?: ConfigRouteOpts) {
         vendor: vendorParse.success ? vendorParse.data : 'custom',
         ...(label ? { label } : {}),
         authType: 'api-key',
-        apiKey,
+        apiKey: pool[0],
+        ...(pool.length > 1 ? { apiKeys: pool } : {}),
         ...(Object.keys(wires).length ? { wires } : {}),
         ...(baseUrl ? { baseUrl } : {}),
         ...(lastModel ? { lastModel } : {}),
@@ -214,9 +219,11 @@ export function createConfigRoutes(opts?: ConfigRouteOpts) {
   app.put('/credentials/:slug', async (c) => {
     try {
       const slug = c.req.param('slug')
-      const body = await c.req.json<{ vendor?: string; label?: string; wires?: unknown; baseUrl?: string; apiKey?: string; lastModel?: string }>()
+      const body = await c.req.json<{ vendor?: string; label?: string; wires?: unknown; baseUrl?: string; apiKey?: string; apiKeys?: unknown; lastModel?: string }>()
       const existing = await resolveCredential(slug)
       const apiKey = body.apiKey?.trim() || existing.apiKey
+      const apiKeys = Array.isArray(body.apiKeys) ? body.apiKeys.filter((key): key is string => typeof key === 'string').map((key) => key.trim()).filter(Boolean) : []
+      const pool = [...new Set([apiKey, ...apiKeys].filter((key): key is string => !!key))]
       const vendorParse = credentialVendorEnum.safeParse(body.vendor)
       const hasLabel = Object.prototype.hasOwnProperty.call(body, 'label')
       const label = typeof body.label === 'string' ? body.label.trim() : undefined
@@ -230,7 +237,8 @@ export function createConfigRoutes(opts?: ConfigRouteOpts) {
           ? (label ? { label } : {})
           : (existing.label ? { label: existing.label } : {})),
         authType: 'api-key',
-        ...(apiKey ? { apiKey } : {}),
+        ...(pool[0] ? { apiKey: pool[0] } : {}),
+        ...(pool.length > 1 ? { apiKeys: pool } : {}),
         ...(Object.keys(wires).length ? { wires } : { ...(existing.wires ? { wires: existing.wires } : {}) }),
         ...(baseUrl ? { baseUrl } : {}),
         ...(lastModel ? { lastModel } : {}),

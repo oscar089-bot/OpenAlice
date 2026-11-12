@@ -17,7 +17,7 @@ function grammyError(description: string, errorCode = 400, method = 'sendMessage
 }
 
 describe('Telegram rich-text send', () => {
-  it('sends original GFM through sendRichMessage', async () => {
+  it('sends deterministic MarkdownV2 before optional rich rendering', async () => {
     const api = {
       sendRichMessage: vi.fn(async () => undefined),
       sendMessage: vi.fn(async () => undefined),
@@ -25,21 +25,21 @@ describe('Telegram rich-text send', () => {
 
     await sendTelegramRichText(api, '42', '**hello**')
 
-    expect(api.sendRichMessage).toHaveBeenCalledWith('42', { markdown: '**hello**' })
-    expect(api.sendMessage).not.toHaveBeenCalled()
+    expect(api.sendMessage).toHaveBeenCalledWith('42', '*hello*', { parse_mode: 'MarkdownV2' })
+    expect(api.sendRichMessage).not.toHaveBeenCalled()
   })
 
-  it('falls back to MarkdownV2 when sendRichMessage is unavailable', async () => {
+  it('falls back to rich rendering when MarkdownV2 is unavailable', async () => {
     const api = {
-      sendRichMessage: vi.fn(async () => {
-        throw grammyError('Not Found', 404, 'sendRichMessage')
+      sendRichMessage: vi.fn(async () => undefined),
+      sendMessage: vi.fn(async (_chatId, _text, other?: { parse_mode?: 'MarkdownV2' }) => {
+        if (other?.parse_mode === 'MarkdownV2') throw grammyError('Not Found', 404, 'sendMessage')
       }),
-      sendMessage: vi.fn(async () => undefined),
     }
 
     await sendTelegramRichText(api, '42', '**hello**')
 
-    expect(api.sendMessage).toHaveBeenCalledWith('42', '*hello*', { parse_mode: 'MarkdownV2' })
+    expect(api.sendRichMessage).toHaveBeenCalledWith('42', { markdown: '**hello**' })
   })
 
   it('falls back to plain text when both formatted sends fail', async () => {
@@ -48,9 +48,7 @@ describe('Telegram rich-text send', () => {
         throw grammyError("Bad Request: can't parse rich message markdown", 400, 'sendRichMessage')
       }),
       sendMessage: vi.fn(async (_chatId, _text, other?: { parse_mode?: 'MarkdownV2' }) => {
-        if (other?.parse_mode === 'MarkdownV2') {
-          throw grammyError("Bad Request: can't parse entities")
-        }
+        if (other?.parse_mode === 'MarkdownV2') throw grammyError("Bad Request: can't parse entities")
       }),
     }
 
@@ -64,11 +62,13 @@ describe('Telegram rich-text send', () => {
       sendRichMessage: vi.fn(async () => {
         throw grammyError('Unauthorized', 401)
       }),
-      sendMessage: vi.fn(async () => undefined),
+      sendMessage: vi.fn(async () => {
+        throw grammyError('Unauthorized', 401, 'sendMessage')
+      }),
     }
 
     await expect(sendTelegramRichText(api, '42', 'hello')).rejects.toThrow('401')
-    expect(api.sendMessage).not.toHaveBeenCalled()
+    expect(api.sendMessage).toHaveBeenCalledOnce()
     expect(isRecoverableRichMessageError(new Error('offline'))).toBe(false)
   })
 
@@ -81,8 +81,8 @@ describe('Telegram rich-text send', () => {
 
     await sendTelegramRichText(api, '42', markdown)
 
-    expect(api.sendRichMessage).toHaveBeenCalledWith('42', { markdown })
-    expect(api.sendMessage).not.toHaveBeenCalled()
+    expect(api.sendMessage).toHaveBeenCalledWith('42', markdown, { parse_mode: 'MarkdownV2' })
+    expect(api.sendRichMessage).not.toHaveBeenCalled()
   })
 
   it('preserves a long plain fallback across multiple messages', async () => {

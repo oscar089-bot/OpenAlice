@@ -185,6 +185,11 @@ export function AIProviderPage() {
                               {t('aiProvider.keySet')}
                             </span>
                           )}
+                          {(cred.apiKeyCount ?? cred.apiKeys?.length ?? (cred.hasApiKey ? 1 : 0)) > 1 && (
+                            <span className="text-[10px] leading-[14px] text-muted-foreground">
+                              {t('aiProvider.keyPool', { count: cred.apiKeyCount ?? cred.apiKeys?.length ?? 1 })}
+                            </span>
+                          )}
                         </div>
                         <div className="mt-0.5 flex min-w-0 flex-col gap-0.5 text-[11px] text-muted-foreground">
                           <span className="truncate">

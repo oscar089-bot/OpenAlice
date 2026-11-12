@@ -237,9 +237,10 @@ export function renderFailedTools(tools: readonly OwnerChatTool[] | undefined): 
 function renderHeader(activity: OwnerChatActivity, frame: number, meta: string, emphasize = false): string {
   const spinner = brailleSpinner(frame)
   const counts = describeToolCounts(activity)
-  if (!counts) return `${spinner} \uD83E\uDDE0 Thinking\u2026`
+  if (!counts) return `${spinner} \uD83E\uDDE0 ${activity.backgroundTask ? 'Background task · Thinking…' : 'Thinking…'}`
   const status = emphasize ? '**Working**' : 'Working'
-  return meta ? `${spinner} ${status} \u00B7 ${counts} \u00B7 ${meta}` : `${spinner} ${status} \u00B7 ${counts}`
+  const prefix = activity.backgroundTask ? `${emphasize ? '**Background task**' : 'Background task'} · ` : ''
+  return meta ? `${spinner} ${prefix}${status} \u00B7 ${counts} \u00B7 ${meta}` : `${spinner} ${prefix}${status} \u00B7 ${counts}`
 }
 
 /**

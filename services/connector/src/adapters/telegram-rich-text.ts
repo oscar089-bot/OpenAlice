@@ -12,8 +12,10 @@ export interface TelegramRichTextApi {
 }
 
 /** Send formatted Telegram text without silently discarding message content.
- * Bot API 10.1 rich messages accept the complete owner-chat payload. Older or
- * incompatible endpoints fall back to MarkdownV2, then lossless plain chunks. */
+ * MarkdownV2 is the deterministic primary renderer: the rich-message endpoint
+ * accepts some GFM payloads without preserving their layout, so using it first
+ * can produce a successful but mangled Telegram message. The rich endpoint is
+ * retained as a compatibility fallback, followed by lossless plain chunks. */
 export async function sendTelegramRichText(
   api: TelegramRichTextApi,
   chatId: string,
@@ -22,17 +24,17 @@ export async function sendTelegramRichText(
   markdownV2 = toTelegramMarkdownV2(markdown),
 ): Promise<void> {
   try {
-    await api.sendRichMessage(chatId, { markdown })
+    await api.sendMessage(chatId, markdownV2, { parse_mode: 'MarkdownV2' })
     return
   } catch (error) {
     if (!isRecoverableRichMessageError(error)) throw error
     console.warn(
-      '[connector] Telegram rich message fell back:',
+      '[connector] Telegram MarkdownV2 fell back:',
       error instanceof Error ? error.message : error,
     )
   }
   try {
-    await api.sendMessage(chatId, markdownV2, { parse_mode: 'MarkdownV2' })
+    await api.sendRichMessage(chatId, { markdown })
     return
   } catch (error) {
     if (!isRecoverableRichMessageError(error)) throw error

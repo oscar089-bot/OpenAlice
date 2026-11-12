@@ -237,6 +237,8 @@ export type OwnerChatTool = z.infer<typeof ownerChatToolSchema>
  * is projected, which is what makes an otherwise-silent turn legible.
  */
 export const ownerChatActivitySchema = z.object({
+  /** True when this activity belongs to an automated/headless task rather than a user turn. */
+  backgroundTask: z.boolean().optional(),
   /** Tool calls seen this turn, in flight or finished. */
   toolCalls: z.number().int().min(0),
   /** Subset of `toolCalls` that ended in failure. */

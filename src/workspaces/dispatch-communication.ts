@@ -32,6 +32,11 @@ export interface DispatchCommunication {
     readonly source: 'conversation' | 'automation'
     readonly contentWorkspaceId: string
   }
+  /** Ephemeral activity destination for automation that reports its durable result elsewhere. */
+  readonly activityDelivery?: {
+    readonly connectorId: string
+    readonly contentWorkspaceId: string
+  }
 }
 
 export function dispatchReply(input: { inquiry?: HeadlessTaskInquiry; trigger?: HeadlessTaskTrigger; conversation?: AgentConversationDispatch }): DispatchReply {
@@ -50,6 +55,8 @@ export function buildDispatchCommunication(input: {
   conversation?: AgentConversationDispatch
   /** Read by Alice from the addressed Issue at admission, never from model output. */
   desk?: { connectorId: string; inboundConnectorId?: string }
+  /** Optional ephemeral activity destination, independent of final reply delivery. */
+  activityDelivery?: { connectorId: string }
 }): DispatchCommunication {
   const reply = dispatchReply(input)
   const origin = input.conversation?.source
@@ -64,6 +71,9 @@ export function buildDispatchCommunication(input: {
     ...(connectorId && matchingDesk && (reply.kind === 'issue-comment' || reply.kind === 'issue-run') ? {
       delivery: { connectorId, source: reply.kind === 'issue-run' ? 'automation' as const : 'conversation' as const,
         contentWorkspaceId: input.target.workspaceId },
+    } : {}),
+    ...(input.activityDelivery && reply.kind === 'issue-run' ? {
+      activityDelivery: { connectorId: input.activityDelivery.connectorId, contentWorkspaceId: input.target.workspaceId },
     } : {}),
   })
 }
@@ -85,11 +95,15 @@ export const dispatchCommunicationSchema: z.ZodType<DispatchCommunication> = z.o
     z.object({ kind: z.literal('issue-comment'), ...addressShape, commentId: z.string().min(1) }),
     z.object({ kind: z.literal('issue-run'), ...addressShape })]),
   delivery: z.object({ connectorId: z.string().min(1), source: z.enum(['conversation', 'automation']), contentWorkspaceId: z.string().min(1) }).optional(),
+  activityDelivery: z.object({ connectorId: z.string().min(1), contentWorkspaceId: z.string().min(1) }).optional(),
 }).superRefine((value, ctx) => {
   if (!value.delivery) return
   if ((value.reply.kind !== 'issue-comment' && value.reply.kind !== 'issue-run')
     || value.delivery.contentWorkspaceId !== value.target.workspaceId
     || value.delivery.source !== (value.reply.kind === 'issue-run' ? 'automation' : 'conversation')) {
     ctx.addIssue({ code: 'custom', message: 'Delivery must match explicit reply ownership and execution workspace' })
+  }
+  if (value.activityDelivery && value.reply.kind !== 'issue-run') {
+    ctx.addIssue({ code: 'custom', message: 'Activity delivery requires an Issue run reply' })
   }
 })

@@ -86,6 +86,7 @@ export function CredentialModal({ mode, cred, presets, agents, initialPresetId, 
   const [customUrl, setCustomUrl] = useState<string>(cred?.wires?.[customInit] ?? '')
   const [directUrl, setDirectUrl] = useState<string>(cred?.baseUrl ?? '')
   const [apiKey, setApiKey] = useState(cred?.apiKey ?? initialApiKey ?? '')
+  const [additionalApiKeys, setAdditionalApiKeys] = useState((cred?.apiKeys ?? []).filter((key) => key !== cred?.apiKey))
   const [presetQuery, setPresetQuery] = useState('')
   const [showKey, setShowKey] = useState(false)
   const [model, setModel] = useState(cred?.lastModel ?? presetDefaultModel(initialPreset))
@@ -209,6 +210,9 @@ export function CredentialModal({ mode, cred, presets, agents, initialPresetId, 
           ...(isDirect ? { baseUrl: directUrl.trim() } : {}),
           label,
           ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}),
+          ...(additionalApiKeys.some((key) => key.trim())
+            ? { apiKeys: [apiKey.trim(), ...additionalApiKeys.map((key) => key.trim()).filter(Boolean)] }
+            : {}),
           ...(model.trim() ? { lastModel: model.trim() } : {}),
         })
       } else {
@@ -217,6 +221,9 @@ export function CredentialModal({ mode, cred, presets, agents, initialPresetId, 
           wires,
           ...(isDirect && directUrl.trim() ? { baseUrl: directUrl.trim() } : {}),
           apiKey: apiKey.trim(),
+          ...(additionalApiKeys.some((key) => key.trim())
+            ? { apiKeys: [apiKey.trim(), ...additionalApiKeys.map((key) => key.trim()).filter(Boolean)] }
+            : {}),
           ...(label ? { label } : {}),
           ...(model.trim() ? { lastModel: model.trim() } : {}),
         })
@@ -461,6 +468,16 @@ export function CredentialModal({ mode, cred, presets, agents, initialPresetId, 
                     {showKey ? t('common.hide') : t('common.show')}
                   </Button>
                 </div>
+                <textarea
+                  className={`${inputClass} mt-2 min-h-16 resize-y font-mono text-[12px]`}
+                  value={additionalApiKeys.join('\n')}
+                  onChange={(event) => { setAdditionalApiKeys(event.target.value.split('\n')); gate.reset() }}
+                  placeholder={t('aiProvider.credentialModal.additionalApiKeys')}
+                  aria-label={t('aiProvider.credentialModal.additionalApiKeys')}
+                  spellCheck={false}
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                />
               </Field>
 
               <Field

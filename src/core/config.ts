@@ -134,6 +134,10 @@ export const credentialSchema = z.object({
   authType: credentialAuthTypeEnum,
   /** Present for api-key credentials; absent for subscription credentials. */
   apiKey: z.string().optional(),
+  /** Additional keys for round-robin request rotation; the legacy apiKey is always the first pool member. */
+  apiKeys: z.array(z.string().trim().min(1)).min(1).optional(),
+  /** Next pool position. This is operational state, not a provider identity. */
+  keyRotationIndex: z.number().int().nonnegative().optional(),
   /**
    * The wire shapes this key can speak, each with its endpoint baseUrl (''/absent
    * = the shape's official endpoint). A provider exposes the SAME key behind
@@ -173,6 +177,10 @@ export function credentialWires(cred: Credential): Partial<Record<CredentialWire
   if (cred.wires && Object.keys(cred.wires).length > 0) return cred.wires
   if (cred.wireShape) return { [cred.wireShape]: cred.baseUrl ?? '' }
   return {}
+}
+
+export function credentialApiKeys(cred: Pick<Credential, 'apiKey' | 'apiKeys'>): string[] {
+  return [...new Set([cred.apiKey, ...(cred.apiKeys ?? [])].filter((key): key is string => !!key?.trim()).map((key) => key.trim()))]
 }
 
 /**
@@ -1013,7 +1021,8 @@ export async function addCredential(credential: Credential): Promise<string> {
   const match = Object.entries(config.credentials).find(([, c]) =>
     c.vendor === validated.vendor &&
     c.authType === validated.authType &&
-    c.apiKey === validated.apiKey,
+    c.apiKey === validated.apiKey &&
+    (validated.vendor !== 'custom' || JSON.stringify(credentialWires(c)) === JSON.stringify(credentialWires(validated))),
   )
   if (match) {
     // Upgrade the existing record's wire capabilities in place (don't
@@ -1025,8 +1034,12 @@ export async function addCredential(credential: Credential): Promise<string> {
       ...credentialWires(existing),
       ...credentialWires(validated),
     }
+    const mergedKeys = credentialApiKeys({ apiKey: existing.apiKey, apiKeys: existing.apiKeys })
+    for (const key of credentialApiKeys({ apiKey: validated.apiKey, apiKeys: validated.apiKeys })) if (!mergedKeys.includes(key)) mergedKeys.push(key)
     config.credentials[match[0]] = {
       ...validated,
+      apiKey: mergedKeys[0],
+      ...(mergedKeys.length > 1 ? { apiKeys: mergedKeys } : {}),
       ...(Object.keys(mergedWires).length ? { wires: mergedWires } : {}),
       ...(validated.label ?? existing.label ? { label: validated.label ?? existing.label } : {}),
       ...(validated.lastModel ?? existing.lastModel ? { lastModel: validated.lastModel ?? existing.lastModel } : {}),
@@ -1043,6 +1056,27 @@ export async function addCredential(credential: Credential): Promise<string> {
   await mkdir(CONFIG_DIR, { recursive: true })
   await writeFile(resolve(CONFIG_DIR, 'ai-provider-manager.json'), JSON.stringify(config, null, 2) + '\n')
   return slug
+}
+
+/** Select and persist the next key for one credential's round-robin pool. */
+export async function nextCredentialApiKey(slug: string, fallback: Credential): Promise<string | undefined> {
+  const config = await readAIProviderConfig()
+  const current = config.credentials[slug] ?? fallback
+  const keys = credentialApiKeys(current)
+  if (keys.length === 0) return undefined
+  const index = (current.keyRotationIndex ?? 0) % keys.length
+  const selected = keys[index]
+  if (config.credentials[slug]) {
+    config.credentials[slug] = {
+      ...current,
+      apiKey: selected,
+      ...(keys.length > 1 ? { apiKeys: keys } : {}),
+      keyRotationIndex: (index + 1) % keys.length,
+    }
+    await mkdir(CONFIG_DIR, { recursive: true })
+    await writeFile(resolve(CONFIG_DIR, 'ai-provider-manager.json'), JSON.stringify(config, null, 2) + '\n')
+  }
+  return selected
 }
 
 /**

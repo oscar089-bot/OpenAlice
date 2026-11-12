@@ -35,6 +35,7 @@ type AuthState = 'loading' | 'authed' | 'login-required' | 'no-token'
 
 export const AUTH_RETRY_DELAYS_MS = [250, 500, 1_000, 2_000, 3_000] as const
 export const BACKEND_HEALTH_POLL_MS = 10_000
+export const BACKEND_OUTAGE_FAILURE_THRESHOLD = 3
 
 export function authRetryDelayMs(attempt: number): number {
   const index = Math.max(0, Math.min(attempt - 1, AUTH_RETRY_DELAYS_MS.length - 1))
@@ -94,6 +95,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [retryAttempt, setRetryAttempt] = useState(0)
   const mountedRef = useRef(false)
   const backendUnavailableRef = useRef(false)
+  const backendFailureCountRef = useRef(0)
   const requestGenerationRef = useRef(0)
   const requestedProbeTimerRef = useRef<number | null>(null)
   const state = deriveState(status)
@@ -104,6 +106,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const next = await getStatus()
       if (!mountedRef.current || generation !== requestGenerationRef.current) return
       setStatus(next)
+      backendFailureCountRef.current = 0
       if (backendUnavailableRef.current) {
         backendUnavailableRef.current = false
         setBackendRecoveryGeneration((current) => current + 1)
@@ -115,8 +118,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // Absence of an answer is not an authentication decision. Preserve the
       // last confirmed status (and therefore the mounted App) while Alice's
       // watch process comes back, then retry with a short capped backoff.
-      backendUnavailableRef.current = true
-      setBackendUnavailable(true)
+      backendFailureCountRef.current += 1
+      if (backendFailureCountRef.current >= BACKEND_OUTAGE_FAILURE_THRESHOLD) {
+        backendUnavailableRef.current = true
+        setBackendUnavailable(true)
+      }
       setRetryAttempt((attempt) => attempt + 1)
     }
   }, [])
@@ -124,6 +130,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const markUnauthorized = useCallback(() => {
     requestGenerationRef.current += 1
     backendUnavailableRef.current = false
+    backendFailureCountRef.current = 0
     setStatus({ authed: false, tokenConfigured: true })
     setBackendUnavailable(false)
     setRetryAttempt(0)
@@ -139,7 +146,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [refresh])
 
   useEffect(() => {
-    if (!backendUnavailable) return
+    if (retryAttempt === 0) return
     const timer = window.setTimeout(() => {
       void refresh()
     }, authRetryDelayMs(retryAttempt))
